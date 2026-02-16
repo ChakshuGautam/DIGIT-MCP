@@ -36,7 +36,15 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         },
         tenant_id: {
           type: 'string',
-          description: 'Tenant ID for login (default: state tenant from environment config)',
+          description: 'Tenant ID for login (default: state tenant from environment config). ' +
+            'Can be a state-level tenant (e.g. "statea") or city-level (e.g. "statea.f"). ' +
+            'The state tenant context is auto-detected from this value.',
+        },
+        state_tenant: {
+          type: 'string',
+          description: 'Explicitly set the root state tenant for all subsequent operations. ' +
+            'This overrides the environment default (e.g. switch from "pg" to "statea"). ' +
+            'All MDMS queries, role assignments, and tenant lookups will use this as the root.',
         },
       },
     },
@@ -52,11 +60,17 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       const tenantId = (args.tenant_id as string) || process.env.CRS_TENANT_ID || env.stateTenantId;
 
       if (!username || !password) {
+        // Apply explicit state_tenant even without login
+        if (args.state_tenant) {
+          digitApi.setStateTenant(args.state_tenant as string);
+        }
+        const currentEnv = digitApi.getEnvironmentInfo();
         return JSON.stringify(
           {
             success: false,
             error: 'Username and password are required. Provide them as arguments or set CRS_USERNAME/CRS_PASSWORD env vars.',
-            environment: env,
+            environment: currentEnv,
+            stateTenantId: currentEnv.stateTenantId,
           },
           null,
           2
@@ -65,13 +79,22 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
 
       try {
         await digitApi.login(username, password, tenantId);
+
+        // Explicit state_tenant override takes precedence over auto-detection from login
+        if (args.state_tenant) {
+          digitApi.setStateTenant(args.state_tenant as string);
+        }
+
         const auth = digitApi.getAuthInfo();
+        const envAfterLogin = digitApi.getEnvironmentInfo();
 
         return JSON.stringify(
           {
             success: true,
-            message: `Authenticated as "${username}" on ${env.name}`,
-            environment: { name: env.name, url: env.url },
+            message: `Authenticated as "${username}" on ${envAfterLogin.name}`,
+            environment: { name: envAfterLogin.name, url: envAfterLogin.url },
+            stateTenantId: envAfterLogin.stateTenantId,
+            loginTenantId: tenantId,
             user: auth.user
               ? {
                   userName: auth.user.userName,
@@ -90,6 +113,7 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
             success: false,
             error: error instanceof Error ? error.message : String(error),
             environment: { name: env.name, url: env.url },
+            stateTenantId: env.stateTenantId,
             hint: 'Check username/password and ensure the environment is reachable.',
           },
           null,
@@ -106,7 +130,8 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
     category: 'environment',
     risk: 'read',
     description:
-      'Show the current DIGIT environment configuration (name, URL, state tenant ID). Also lists all available environments that can be switched to.',
+      'Show the current DIGIT environment configuration (name, URL, state tenant ID). Also lists all available environments. ' +
+      'Can switch environment or change the active state tenant.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -116,25 +141,38 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
             'Optional: switch to a different environment before returning info. Available keys: ' +
             Object.keys(ENVIRONMENTS).join(', '),
         },
+        state_tenant: {
+          type: 'string',
+          description: 'Optional: override the root state tenant (e.g. switch from "pg" to "statea")',
+        },
       },
     },
     handler: async (args) => {
       if (args.switch_to) {
         digitApi.setEnvironment(args.switch_to as string);
       }
+      if (args.state_tenant) {
+        digitApi.setStateTenant(args.state_tenant as string);
+      }
 
       const env = digitApi.getEnvironmentInfo();
+      const auth = digitApi.getAuthInfo();
       return JSON.stringify(
         {
           success: true,
-          current: env,
+          current: {
+            name: env.name,
+            url: env.url,
+            stateTenantId: env.stateTenantId,
+          },
+          authenticated: auth.authenticated,
+          user: auth.user ? { userName: auth.user.userName, tenantId: auth.user.tenantId } : null,
           available: Object.entries(ENVIRONMENTS).map(([key, e]) => ({
             key,
             name: e.name,
             url: e.url,
-            stateTenantId: e.stateTenantId,
+            defaultStateTenantId: e.stateTenantId,
           })),
-          authenticated: digitApi.isAuthenticated(),
         },
         null,
         2

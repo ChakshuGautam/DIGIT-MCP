@@ -16,6 +16,7 @@ class ApiClientError extends Error {
 
 class DigitApiClient {
   private environment: Environment;
+  private stateTenantOverride: string | null = null;
   private authToken: string | null = null;
   private userInfo: UserInfo | null = null;
 
@@ -24,21 +25,33 @@ class DigitApiClient {
   }
 
   getEnvironmentInfo(): Environment {
+    if (this.stateTenantOverride) {
+      return { ...this.environment, stateTenantId: this.stateTenantOverride };
+    }
     return this.environment;
   }
 
   setEnvironment(envKey: string): void {
     this.environment = getEnvironment(envKey);
+    this.stateTenantOverride = null;
     this.authToken = null;
     this.userInfo = null;
+  }
+
+  setStateTenant(tenantId: string): void {
+    this.stateTenantOverride = tenantId;
   }
 
   isAuthenticated(): boolean {
     return this.authToken !== null;
   }
 
-  getAuthInfo(): { authenticated: boolean; user: UserInfo | null } {
-    return { authenticated: this.isAuthenticated(), user: this.userInfo };
+  getAuthInfo(): { authenticated: boolean; user: UserInfo | null; stateTenantId: string } {
+    return {
+      authenticated: this.isAuthenticated(),
+      user: this.userInfo,
+      stateTenantId: this.getEnvironmentInfo().stateTenantId,
+    };
   }
 
   // Resolve endpoint path, applying environment overrides if present
@@ -91,6 +104,12 @@ class DigitApiClient {
     const data = await response.json() as { access_token: string; UserRequest: UserInfo };
     this.authToken = data.access_token;
     this.userInfo = data.UserRequest;
+
+    // Auto-detect state tenant from login tenant ID
+    // e.g. "statea.f" → "statea", "pg.citya" → "pg", "pg" → "pg"
+    const derivedState = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
+    // Set override if different from environment default, otherwise clear any previous override
+    this.stateTenantOverride = derivedState !== this.environment.stateTenantId ? derivedState : null;
   }
 
   private async request<T = unknown>(
@@ -434,12 +453,13 @@ class DigitApiClient {
     citizen?: Record<string, unknown>
   ): Promise<Record<string, unknown>> {
     // Build citizen from provided data or from logged-in user
+    const env = this.getEnvironmentInfo();
     const citizenInfo = citizen || (this.userInfo ? {
       mobileNumber: this.userInfo.mobileNumber || '0000000000',
       name: this.userInfo.name,
       type: 'CITIZEN',
-      roles: [{ code: 'CITIZEN', name: 'Citizen', tenantId: this.environment.stateTenantId }],
-      tenantId: this.environment.stateTenantId,
+      roles: [{ code: 'CITIZEN', name: 'Citizen', tenantId: env.stateTenantId }],
+      tenantId: env.stateTenantId,
     } : undefined);
 
     const data = await this.request<{ ServiceWrappers?: Record<string, unknown>[] }>(
