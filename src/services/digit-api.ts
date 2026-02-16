@@ -470,7 +470,7 @@ class DigitApiClient {
           tenantId,
           serviceCode,
           description,
-          address: { tenantId, ...address },
+          address: { tenantId, geoLocation: {}, ...address },
           citizen: citizenInfo,
           source: 'web',
           active: true,
