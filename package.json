@@ -10,8 +10,10 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "start:http": "MCP_TRANSPORT=http node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "tsx test-validator.ts"
+    "test": "tsx test-validator.ts",
+    "test:ci": "tsx test-integration.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"

@@ -7,6 +7,7 @@ import { registerPgrWorkflowTools } from './pgr-workflow.js';
 import { registerFilestoreAclTools } from './filestore-acl.js';
 import { registerIdgenLocationTools } from './idgen-location.js';
 import { registerEncryptionTools } from './encryption.js';
+import { registerHealthCheckTools } from './health-check.js';
 
 export function registerAllTools(registry: ToolRegistry): void {
   registerDiscoverTools(registry);
@@ -17,4 +18,5 @@ export function registerAllTools(registry: ToolRegistry): void {
   registerFilestoreAclTools(registry);
   registerIdgenLocationTools(registry);
   registerEncryptionTools(registry);
+  registerHealthCheckTools(registry);
 }

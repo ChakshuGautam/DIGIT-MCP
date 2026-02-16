@@ -1,23 +1,68 @@
 # DIGIT MCP Server
 
-MCP server for interacting with DIGIT platform APIs with **progressive disclosure** — 5 core tools load initially, with 26 more available on-demand across 10 domain groups.
+[![CI](https://github.com/ChakshuGautam/digit-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ChakshuGautam/digit-mcp/actions/workflows/ci.yml)
+
+MCP server for interacting with DIGIT platform APIs with **progressive disclosure** — 6 core tools load initially, with 26 more available on-demand across 10 domain groups. Supports **dual transport**: stdio (local Claude Code) and HTTP Streamable (containerized/K8s).
 
 ## Quick Start
 
 ```bash
 npm install
 npm run build
-npm start                      # stdio transport
+npm start                      # stdio transport (default)
+npm run start:http             # HTTP transport on :3000
 npx tsx test-integration.ts    # integration test (requires running DIGIT stack)
 ```
 
+## Docker
+
+```bash
+# Build
+docker build -t digit-mcp .
+
+# Run
+docker run -p 3000:3000 \
+  -e CRS_ENVIRONMENT=chakshu-digit \
+  -e CRS_USERNAME=ADMIN \
+  -e CRS_PASSWORD=eGov@123 \
+  digit-mcp
+
+# Health check
+curl http://localhost:3000/healthz
+
+# MCP endpoint
+curl -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Pre-built image: `ghcr.io/chakshugautam/digit-mcp:latest`
+
+## Helm (Kubernetes)
+
+```bash
+# Install
+helm install digit-mcp ./helm/digit-mcp \
+  --set env.CRS_ENVIRONMENT=chakshu-digit \
+  --set secret.CRS_USERNAME=ADMIN \
+  --set secret.CRS_PASSWORD=eGov@123
+
+# Upgrade
+helm upgrade digit-mcp ./helm/digit-mcp
+
+# Uninstall
+helm uninstall digit-mcp
+```
+
+See [`helm/digit-mcp/values.yaml`](helm/digit-mcp/values.yaml) for all configuration options.
+
 ## Progressive Disclosure
 
-The server starts with 5 core tools. Additional tools are unlocked by calling `enable_tools`:
+The server starts with 6 core tools. Additional tools are unlocked by calling `enable_tools`:
 
 | Group | Tools | Purpose |
 |-------|-------|---------|
-| **core** (always on) | `discover_tools`, `enable_tools`, `configure`, `get_environment_info`, `mdms_get_tenants` | Discovery + environment + auth |
+| **core** (always on) | `discover_tools`, `enable_tools`, `configure`, `get_environment_info`, `mdms_get_tenants`, `health_check` | Discovery + environment + auth + health |
 | **mdms** | `validate_tenant`, `mdms_search`, `mdms_create` | Tenant validation + MDMS v2 CRUD |
 | **boundary** | `validate_boundary`, `boundary_mgmt_process`, `boundary_mgmt_search`, `boundary_mgmt_generate`, `boundary_mgmt_download` | Boundary hierarchy validation + boundary management CRUD |
 | **masters** | `validate_departments`, `validate_designations`, `validate_complaint_types` | Department, designation, PGR service def validation |
@@ -31,7 +76,7 @@ The server starts with 5 core tools. Additional tools are unlocked by calling `e
 
 When groups are enabled/disabled, the server sends `tools/list_changed` notifications so the MCP client re-fetches the tool list.
 
-## All 31 Tools
+## All 32 Tools
 
 | # | Tool | Group | Risk | DIGIT Service | Description |
 |---|------|-------|------|---------------|-------------|
@@ -40,32 +85,33 @@ When groups are enabled/disabled, the server sends `tools/list_changed` notifica
 | 3 | `configure` | core | read | egov-user | Authenticate with a DIGIT environment |
 | 4 | `get_environment_info` | core | read | — | Show current environment config |
 | 5 | `mdms_get_tenants` | core | read | egov-mdms-service | List all tenants from MDMS |
-| 6 | `validate_tenant` | mdms | read | egov-mdms-service | Check if a tenant code exists |
-| 7 | `mdms_search` | mdms | read | egov-mdms-service | Generic MDMS v2 search by schema code |
-| 8 | `mdms_create` | mdms | write | egov-mdms-service | Create a new MDMS v2 record |
-| 9 | `validate_boundary` | boundary | read | boundary-service | Validate boundary hierarchy for a tenant |
-| 10 | `validate_departments` | masters | read | egov-mdms-service | Validate department records in MDMS |
-| 11 | `validate_designations` | masters | read | egov-mdms-service | Validate designation records in MDMS |
-| 12 | `validate_complaint_types` | masters | read | egov-mdms-service | Validate PGR service definitions in MDMS |
-| 13 | `validate_employees` | employees | read | egov-hrms | Validate HRMS employee setup |
-| 14 | `localization_search` | localization | read | egov-localization | Search localization messages by locale/module |
-| 15 | `localization_upsert` | localization | write | egov-localization | Create or update localization messages |
-| 16 | `pgr_search` | pgr | read | pgr-services | Search PGR complaints/service requests |
-| 17 | `pgr_create` | pgr | write | pgr-services | Create a new PGR complaint |
-| 18 | `pgr_update` | pgr | write | pgr-services | Update complaint status via workflow action |
-| 19 | `workflow_business_services` | pgr | read | egov-workflow-v2 | Search workflow state machine definitions |
-| 20 | `workflow_process_search` | pgr | read | egov-workflow-v2 | Search workflow process audit trail |
-| 21 | `filestore_get_urls` | admin | read | egov-filestore | Get download URLs for filestore IDs |
-| 22 | `access_roles_search` | admin | read | egov-accesscontrol | Search all defined roles |
-| 23 | `access_actions_search` | admin | read | egov-accesscontrol | Search actions/permissions by role |
-| 24 | `idgen_generate` | idgen | write | egov-idgen | Generate unique formatted IDs |
-| 25 | `location_search` | location | read | egov-location | Search geographic boundaries (legacy) |
-| 26 | `encrypt_data` | encryption | write | egov-enc-service | Encrypt sensitive data values |
-| 27 | `decrypt_data` | encryption | write | egov-enc-service | Decrypt encrypted data values |
-| 28 | `boundary_mgmt_process` | boundary | write | egov-bndry-mgmnt | Process/upload boundary data |
-| 29 | `boundary_mgmt_search` | boundary | read | egov-bndry-mgmnt | Search processed boundary data |
-| 30 | `boundary_mgmt_generate` | boundary | write | egov-bndry-mgmnt | Generate boundary codes |
-| 31 | `boundary_mgmt_download` | boundary | read | egov-bndry-mgmnt | Search/download generated boundaries |
+| 6 | `health_check` | core | read | all | Probe all DIGIT services and report health status |
+| 7 | `validate_tenant` | mdms | read | egov-mdms-service | Check if a tenant code exists |
+| 8 | `mdms_search` | mdms | read | egov-mdms-service | Generic MDMS v2 search by schema code |
+| 9 | `mdms_create` | mdms | write | egov-mdms-service | Create a new MDMS v2 record |
+| 10 | `validate_boundary` | boundary | read | boundary-service | Validate boundary hierarchy for a tenant |
+| 11 | `validate_departments` | masters | read | egov-mdms-service | Validate department records in MDMS |
+| 12 | `validate_designations` | masters | read | egov-mdms-service | Validate designation records in MDMS |
+| 13 | `validate_complaint_types` | masters | read | egov-mdms-service | Validate PGR service definitions in MDMS |
+| 14 | `validate_employees` | employees | read | egov-hrms | Validate HRMS employee setup |
+| 15 | `localization_search` | localization | read | egov-localization | Search localization messages by locale/module |
+| 16 | `localization_upsert` | localization | write | egov-localization | Create or update localization messages |
+| 17 | `pgr_search` | pgr | read | pgr-services | Search PGR complaints/service requests |
+| 18 | `pgr_create` | pgr | write | pgr-services | Create a new PGR complaint |
+| 19 | `pgr_update` | pgr | write | pgr-services | Update complaint status via workflow action |
+| 20 | `workflow_business_services` | pgr | read | egov-workflow-v2 | Search workflow state machine definitions |
+| 21 | `workflow_process_search` | pgr | read | egov-workflow-v2 | Search workflow process audit trail |
+| 22 | `filestore_get_urls` | admin | read | egov-filestore | Get download URLs for filestore IDs |
+| 23 | `access_roles_search` | admin | read | egov-accesscontrol | Search all defined roles |
+| 24 | `access_actions_search` | admin | read | egov-accesscontrol | Search actions/permissions by role |
+| 25 | `idgen_generate` | idgen | write | egov-idgen | Generate unique formatted IDs |
+| 26 | `location_search` | location | read | egov-location | Search geographic boundaries (legacy) |
+| 27 | `encrypt_data` | encryption | write | egov-enc-service | Encrypt sensitive data values |
+| 28 | `decrypt_data` | encryption | write | egov-enc-service | Decrypt encrypted data values |
+| 29 | `boundary_mgmt_process` | boundary | write | egov-bndry-mgmnt | Process/upload boundary data |
+| 30 | `boundary_mgmt_search` | boundary | read | egov-bndry-mgmnt | Search processed boundary data |
+| 31 | `boundary_mgmt_generate` | boundary | write | egov-bndry-mgmnt | Generate boundary codes |
+| 32 | `boundary_mgmt_download` | boundary | read | egov-bndry-mgmnt | Search/download generated boundaries |
 
 ## DIGIT API Coverage
 
@@ -104,6 +150,8 @@ Full API documentation is available at [`docs/openapi.yaml`](docs/openapi.yaml) 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio` (local) or `http` (container/K8s) |
+| `MCP_PORT` | `3000` | HTTP server port (only used when `MCP_TRANSPORT=http`) |
 | `CRS_ENVIRONMENT` | `chakshu-digit` | Environment key (`chakshu-digit`, `dev`, `local`) |
 | `CRS_USERNAME` | — | DIGIT username for auto-login |
 | `CRS_PASSWORD` | — | DIGIT password for auto-login |
@@ -142,7 +190,7 @@ Add to `~/.claude/settings.json`:
 
 ```
 src/
-├── index.ts                  # Entry point (stdio transport)
+├── index.ts                  # Entry point (dual transport: stdio or HTTP)
 ├── server.ts                 # MCP server with listChanged capability
 ├── types/index.ts            # Shared types, MDMS schema constants
 ├── config/
@@ -160,7 +208,12 @@ src/
     ├── filestore-acl.ts      # filestore_get_urls, access_roles_search, access_actions_search
     ├── idgen-location.ts     # idgen_generate, location_search
     ├── encryption.ts         # encrypt_data, decrypt_data
+    ├── health-check.ts      # health_check (probe all DIGIT services)
     └── index.ts              # Aggregator: registerAllTools()
 docs/
 └── openapi.yaml              # OpenAPI 3.0 spec for all DIGIT API endpoints
+helm/
+└── digit-mcp/                # Helm chart for Kubernetes deployment
+Dockerfile                    # Multi-stage container build
+.github/workflows/ci.yml     # GitHub Actions CI pipeline
 ```
