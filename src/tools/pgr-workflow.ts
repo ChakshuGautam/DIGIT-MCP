@@ -53,14 +53,34 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
           complaints: complaints.map((sw) => {
             const svc = sw.service as Record<string, unknown> | undefined;
             const wf = sw.workflow as Record<string, unknown> | undefined;
+            const citizen = svc?.citizen as Record<string, unknown> | undefined;
+            const address = svc?.address as Record<string, unknown> | undefined;
+            const audit = svc?.auditDetails as Record<string, unknown> | undefined;
             return {
               serviceRequestId: svc?.serviceRequestId,
               serviceCode: svc?.serviceCode,
               description: svc?.description,
               status: svc?.applicationStatus,
-              workflowAction: wf?.action,
-              workflowState: wf?.state,
-              createdTime: (svc?.auditDetails as Record<string, unknown>)?.createdTime,
+              priority: svc?.priority,
+              rating: svc?.rating,
+              citizen: citizen ? {
+                name: citizen.name,
+                mobileNumber: citizen.mobileNumber,
+                uuid: citizen.uuid,
+              } : null,
+              address: address ? {
+                locality: address.locality,
+                city: address.city,
+                district: address.district,
+              } : null,
+              workflow: wf ? {
+                action: wf.action,
+                state: wf.state,
+                assignes: wf.assignes,
+                comment: wf.comments,
+              } : null,
+              createdTime: audit?.createdTime,
+              lastModifiedTime: audit?.lastModifiedTime,
             };
           }),
         },
@@ -186,7 +206,10 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
     category: 'pgr',
     risk: 'write',
     description:
-      'Update a PGR complaint status via workflow action. First use pgr_search to get the service wrapper, then pass the action (ASSIGN, RESOLVE, REJECT, REOPEN, etc.).',
+      'Update a PGR complaint via workflow action. Automatically fetches the complaint, then applies the action. ' +
+      'Actions: ASSIGN (GRO assigns to LME employee), REASSIGN, RESOLVE (LME marks resolved), REJECT (GRO rejects), ' +
+      'REOPEN (citizen reopens), RATE (citizen rates and closes). ' +
+      'For ASSIGN/REASSIGN: use validate_employees to find employee UUIDs for the assignee.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -200,12 +223,21 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         },
         action: {
           type: 'string',
-          enum: ['ASSIGN', 'REASSIGN', 'RESOLVE', 'REJECT', 'REOPEN', 'CLOSEDAFTERRESOLUTION'],
-          description: 'Workflow action to perform',
+          enum: ['ASSIGN', 'REASSIGN', 'RESOLVE', 'REJECT', 'REOPEN', 'RATE'],
+          description: 'Workflow action to perform. ASSIGN: GRO assigns to LME. RESOLVE: LME resolves. REJECT: GRO rejects. REOPEN: citizen reopens. RATE: citizen rates and closes.',
+        },
+        assignees: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Employee UUIDs to assign the complaint to (optional for ASSIGN/REASSIGN). If omitted, PGR auto-routes based on department/locality configuration.',
         },
         comment: {
           type: 'string',
-          description: 'Optional comment for the action',
+          description: 'Comment for the action (recommended for all actions)',
+        },
+        rating: {
+          type: 'number',
+          description: 'Citizen satisfaction rating (1-5). Used with RATE action.',
         },
       },
       required: ['tenant_id', 'service_request_id', 'action'],
@@ -213,39 +245,98 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
     handler: async (args) => {
       await ensureAuthenticated();
 
-      // First fetch the current complaint
+      const action = args.action as string;
+
+      // Warn (but allow) ASSIGN/REASSIGN without assignees — PGR auto-routes
+      const assigneeWarning = (action === 'ASSIGN' || action === 'REASSIGN') && !(args.assignees as string[] | undefined)?.length
+        ? 'No assignees specified — PGR will auto-route. Pass employee UUIDs in assignees for explicit assignment.'
+        : undefined;
+
+      // Fetch the current complaint
       const complaints = await digitApi.pgrSearch(args.tenant_id as string, {
         serviceRequestId: args.service_request_id as string,
       });
 
       if (complaints.length === 0) {
         return JSON.stringify(
-          { success: false, error: `Complaint "${args.service_request_id}" not found` },
+          { success: false, error: `Complaint "${args.service_request_id}" not found in tenant "${args.tenant_id}"` },
           null,
           2
         );
       }
 
-      const result = await digitApi.pgrUpdate(
-        complaints[0],
-        args.action as string,
-        args.comment as string | undefined
-      );
+      // Extract the service object from the ServiceWrapper
+      const serviceWrapper = complaints[0];
+      const service = serviceWrapper.service as Record<string, unknown>;
 
-      const svc = (result.service || {}) as Record<string, unknown>;
+      if (!service) {
+        return JSON.stringify(
+          { success: false, error: 'Fetched complaint has no service object. The complaint data may be corrupted.' },
+          null,
+          2
+        );
+      }
 
-      return JSON.stringify(
-        {
-          success: true,
-          message: `Complaint ${args.service_request_id} updated with action ${args.action}`,
-          complaint: {
-            serviceRequestId: svc.serviceRequestId,
-            status: svc.applicationStatus,
+      try {
+        const result = await digitApi.pgrUpdate(
+          service,
+          action,
+          {
+            comment: args.comment as string | undefined,
+            assignees: args.assignees as string[] | undefined,
+            rating: args.rating as number | undefined,
+          }
+        );
+
+        const svc = (result.service || {}) as Record<string, unknown>;
+        const wf = (result.workflow || {}) as Record<string, unknown>;
+
+        return JSON.stringify(
+          {
+            success: true,
+            message: `Complaint ${args.service_request_id} updated: ${action}`,
+            warning: assigneeWarning,
+            complaint: {
+              serviceRequestId: svc.serviceRequestId,
+              previousStatus: service.applicationStatus,
+              newStatus: svc.applicationStatus,
+              workflowState: wf.state,
+              rating: svc.rating,
+            },
           },
-        },
-        null,
-        2
-      );
+          null,
+          2
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const isRoleError = msg.includes('role') || msg.includes('authorized') || msg.includes('permission');
+        const isStateError = msg.includes('state') || msg.includes('transition') || msg.includes('action');
+
+        let hint: string;
+        if (isRoleError) {
+          hint = `The authenticated user may lack the required role for action "${action}". ` +
+            'PGR workflow roles: GRO can ASSIGN/REASSIGN/REJECT, PGR_LME can RESOLVE, CITIZEN can REOPEN/RATE. ' +
+            'Use workflow_business_services to check role requirements.';
+        } else if (isStateError) {
+          hint = `Action "${action}" may not be valid for the complaint's current status "${service.applicationStatus}". ` +
+            'Use workflow_business_services to see the valid transitions from the current state.';
+        } else {
+          hint = 'PGR update failed. Use pgr_search to verify the complaint exists, and workflow_business_services to check valid actions.';
+        }
+
+        return JSON.stringify({
+          success: false,
+          error: msg,
+          currentStatus: service.applicationStatus,
+          attemptedAction: action,
+          hint,
+          alternatives: [
+            { tool: 'pgr_search', purpose: 'Verify complaint current status' },
+            { tool: 'workflow_business_services', purpose: 'Check valid workflow transitions and role requirements' },
+            { tool: 'validate_employees', purpose: 'Find employees with correct PGR roles' },
+          ],
+        }, null, 2);
+      }
     },
   } satisfies ToolMetadata);
 

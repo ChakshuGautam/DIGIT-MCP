@@ -7,7 +7,7 @@ class ApiClientError extends Error {
   public statusCode: number;
 
   constructor(errors: ApiError[], statusCode: number) {
-    super(errors.map((e) => e.message).join(', '));
+    super(errors.map((e) => e.message || e.code || 'Unknown error').join(', '));
     this.name = 'ApiClientError';
     this.errors = errors;
     this.statusCode = statusCode;
@@ -484,23 +484,27 @@ class DigitApiClient {
     return (data.ServiceWrappers || [])[0] || {};
   }
 
-  // PGR complaint update
+  // PGR complaint update — service and workflow are top-level keys (not wrapped)
   async pgrUpdate(
-    serviceWrapper: Record<string, unknown>,
+    service: Record<string, unknown>,
     action: string,
-    comment?: string
+    options?: { comment?: string; assignees?: string[]; rating?: number }
   ): Promise<Record<string, unknown>> {
+    const workflow: Record<string, unknown> = {
+      action,
+      assignes: options?.assignees || [],
+      comments: options?.comment,
+    };
+    if (options?.rating !== undefined) {
+      workflow.rating = options.rating;
+    }
+
     const data = await this.request<{ ServiceWrappers?: Record<string, unknown>[] }>(
       this.endpoint('PGR_UPDATE'),
       {
         RequestInfo: this.buildRequestInfo(),
-        ServiceWrapper: {
-          ...serviceWrapper,
-          workflow: {
-            action,
-            comments: comment,
-          },
-        },
+        service,
+        workflow,
       }
     );
 

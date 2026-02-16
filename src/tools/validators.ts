@@ -544,12 +544,17 @@ export function registerValidatorTools(registry: ToolRegistry): void {
           success: true,
           validation: result,
           employeeCount: employees.length,
-          employees: employees.slice(0, 20).map((e) => ({
-            code: e.code,
-            name: (e.user as Record<string, unknown>)?.name,
-            status: e.employeeStatus,
-            roles: ((e.user as Record<string, unknown>)?.roles as Array<{ code: string }> || []).map((r) => r.code),
-          })),
+          employees: employees.slice(0, 20).map((e) => {
+            const user = e.user as Record<string, unknown> | undefined;
+            return {
+              code: e.code,
+              uuid: e.uuid || user?.uuid,
+              name: user?.name,
+              mobileNumber: user?.mobileNumber,
+              status: e.employeeStatus,
+              roles: ((user?.roles || []) as Array<{ code: string }>).map((r) => r.code),
+            };
+          }),
         },
         null,
         2
