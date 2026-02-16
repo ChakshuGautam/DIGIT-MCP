@@ -1,0 +1,159 @@
+import type { ToolMetadata } from '../types/index.js';
+import type { ToolRegistry } from './registry.js';
+import { digitApi } from '../services/digit-api.js';
+
+export function registerFilestoreAclTools(registry: ToolRegistry): void {
+  // ──────────────────────────────────────────
+  // Filestore tools
+  // ──────────────────────────────────────────
+
+  registry.register({
+    name: 'filestore_get_urls',
+    group: 'admin',
+    category: 'filestore',
+    risk: 'read',
+    description:
+      'Get download URLs for files stored in DIGIT filestore. Takes file store IDs (from tenant logos, employee documents, etc.) and returns signed URLs.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID',
+        },
+        file_store_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'File store IDs to get URLs for',
+        },
+      },
+      required: ['tenant_id', 'file_store_ids'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const files = await digitApi.filestoreGetUrl(
+        args.tenant_id as string,
+        args.file_store_ids as string[]
+      );
+
+      return JSON.stringify(
+        {
+          success: true,
+          tenantId: args.tenant_id,
+          count: files.length,
+          files: files.map((f) => ({
+            id: f.id,
+            url: f.url,
+          })),
+        },
+        null,
+        2
+      );
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // Access Control tools
+  // ──────────────────────────────────────────
+
+  registry.register({
+    name: 'access_roles_search',
+    group: 'admin',
+    category: 'access-control',
+    risk: 'read',
+    description:
+      'Search all defined roles in the access control system. Returns role codes, names, and descriptions. Use this to verify role codes referenced in employee assignments or MDMS role configs.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID to search roles for',
+        },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const roles = await digitApi.accessRolesSearch(args.tenant_id as string);
+
+      return JSON.stringify(
+        {
+          success: true,
+          tenantId: args.tenant_id,
+          count: roles.length,
+          roles: roles.map((r) => ({
+            code: r.code,
+            name: r.name,
+            description: r.description,
+          })),
+        },
+        null,
+        2
+      );
+    },
+  } satisfies ToolMetadata);
+
+  registry.register({
+    name: 'access_actions_search',
+    group: 'admin',
+    category: 'access-control',
+    risk: 'read',
+    description:
+      'Search actions/permissions available to specific roles. Shows which API endpoints and UI actions each role can access. Useful for debugging permission issues.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID',
+        },
+        role_codes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Role codes to look up actions for (e.g. ["GRO", "PGR_LME"])',
+        },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const actions = await digitApi.accessActionsSearch(
+        args.tenant_id as string,
+        args.role_codes as string[] | undefined
+      );
+
+      return JSON.stringify(
+        {
+          success: true,
+          tenantId: args.tenant_id,
+          roleCodes: args.role_codes || '(all)',
+          count: actions.length,
+          actions: actions.slice(0, 100).map((a) => ({
+            url: a.url,
+            displayName: a.displayName,
+            serviceName: a.serviceName,
+            enabled: a.enabled,
+          })),
+          truncated: actions.length > 100,
+        },
+        null,
+        2
+      );
+    },
+  } satisfies ToolMetadata);
+}
+
+async function ensureAuthenticated(): Promise<void> {
+  if (digitApi.isAuthenticated()) return;
+  const username = process.env.CRS_USERNAME;
+  const password = process.env.CRS_PASSWORD;
+  const tenantId = process.env.CRS_TENANT_ID || digitApi.getEnvironmentInfo().stateTenantId;
+  if (!username || !password) {
+    throw new Error('Not authenticated. Call the "configure" tool first, or set CRS_USERNAME/CRS_PASSWORD env vars.');
+  }
+  await digitApi.login(username, password, tenantId);
+}
