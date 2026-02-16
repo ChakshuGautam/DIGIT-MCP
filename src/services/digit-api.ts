@@ -128,6 +128,45 @@ class DigitApiClient {
     return data as T;
   }
 
+  // User search
+  async userSearch(
+    tenantId: string,
+    options?: { userName?: string; mobileNumber?: string; uuid?: string[]; roleCodes?: string[]; userType?: string; limit?: number; offset?: number }
+  ): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ user?: Record<string, unknown>[] }>(
+      this.endpoint('USER_SEARCH'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        tenantId,
+        userName: options?.userName,
+        mobileNumber: options?.mobileNumber,
+        uuid: options?.uuid,
+        roleCodes: options?.roleCodes,
+        userType: options?.userType,
+        pageSize: options?.limit || 100,
+        pageNumber: options?.offset ? Math.floor(options.offset / (options.limit || 100)) : 0,
+      }
+    );
+
+    return data.user || [];
+  }
+
+  // User create (no-validate)
+  async userCreate(
+    user: Record<string, unknown>,
+    tenantId: string
+  ): Promise<Record<string, unknown>> {
+    const data = await this.request<{ user?: Record<string, unknown>[] }>(
+      this.endpoint('USER_CREATE'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        user: { ...user, tenantId },
+      }
+    );
+
+    return (data.user || [])[0] || {};
+  }
+
   // MDMS v2 Search — returns typed array
   async mdmsV2Search<T = Record<string, unknown>>(
     tenantId: string,
@@ -175,7 +214,7 @@ class DigitApiClient {
     uniqueIdentifier: string,
     recordData: Record<string, unknown>
   ): Promise<MdmsRecord> {
-    const data = await this.request<{ Mdms: MdmsRecord }>(
+    const data = await this.request<{ mdms?: MdmsRecord[] }>(
       `${this.endpoint('MDMS_CREATE')}/${schemaCode}`,
       {
         RequestInfo: this.buildRequestInfo(),
@@ -189,7 +228,7 @@ class DigitApiClient {
       }
     );
 
-    return data.Mdms;
+    return (data.mdms || [])[0] as MdmsRecord;
   }
 
   // Boundary search
@@ -231,6 +270,104 @@ class DigitApiClient {
     );
 
     return data.Employees || [];
+  }
+
+  // HRMS employee create
+  async employeeCreate(
+    tenantId: string,
+    employees: Record<string, unknown>[]
+  ): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ Employees?: Record<string, unknown>[] }>(
+      this.endpoint('HRMS_EMPLOYEES_CREATE'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        Employees: employees.map((emp) => ({ ...emp, tenantId })),
+      }
+    );
+
+    return data.Employees || [];
+  }
+
+  // HRMS employee update
+  async employeeUpdate(
+    tenantId: string,
+    employees: Record<string, unknown>[]
+  ): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ Employees?: Record<string, unknown>[] }>(
+      this.endpoint('HRMS_EMPLOYEES_UPDATE'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        Employees: employees,
+      }
+    );
+
+    return data.Employees || [];
+  }
+
+  // Boundary hierarchy definition search
+  async boundaryHierarchySearch(
+    tenantId: string,
+    hierarchyType?: string
+  ): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ BoundaryHierarchy?: Record<string, unknown>[] }>(
+      this.endpoint('BOUNDARY_HIERARCHY_SEARCH'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        BoundaryTypeHierarchySearchCriteria: {
+          tenantId,
+          hierarchyType,
+          limit: 100,
+          offset: 0,
+        },
+      }
+    );
+
+    return data.BoundaryHierarchy || [];
+  }
+
+  // Filestore upload (multipart)
+  async filestoreUpload(
+    tenantId: string,
+    module: string,
+    fileBuffer: Buffer,
+    fileName: string,
+    contentType: string
+  ): Promise<Record<string, unknown>[]> {
+    const boundary = `----FormBoundary${Date.now()}`;
+    const crlf = '\r\n';
+
+    const bodyParts: Buffer[] = [];
+    // tenantId field
+    bodyParts.push(Buffer.from(
+      `--${boundary}${crlf}Content-Disposition: form-data; name="tenantId"${crlf}${crlf}${tenantId}${crlf}`
+    ));
+    // module field
+    bodyParts.push(Buffer.from(
+      `--${boundary}${crlf}Content-Disposition: form-data; name="module"${crlf}${crlf}${module}${crlf}`
+    ));
+    // file field
+    bodyParts.push(Buffer.from(
+      `--${boundary}${crlf}Content-Disposition: form-data; name="file"; filename="${fileName}"${crlf}Content-Type: ${contentType}${crlf}${crlf}`
+    ));
+    bodyParts.push(fileBuffer);
+    bodyParts.push(Buffer.from(`${crlf}--${boundary}--${crlf}`));
+
+    const body = Buffer.concat(bodyParts);
+
+    const url = `${this.environment.url}${this.endpoint('FILESTORE_UPLOAD')}`;
+    const headers: Record<string, string> = {
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+    };
+    if (this.authToken) headers['Authorization'] = `Bearer ${this.authToken}`;
+
+    const response = await fetch(url, { method: 'POST', headers, body });
+    const data = await response.json() as Record<string, unknown>;
+
+    if (!response.ok) {
+      throw new Error((data.message as string) || `File upload failed: ${response.status}`);
+    }
+
+    return (data.files as Record<string, unknown>[]) || [];
   }
 
   // Localization search — locale & tenantId are query params
@@ -293,24 +430,33 @@ class DigitApiClient {
     tenantId: string,
     serviceCode: string,
     description: string,
-    address: Record<string, unknown>
+    address: Record<string, unknown>,
+    citizen?: Record<string, unknown>
   ): Promise<Record<string, unknown>> {
+    // Build citizen from provided data or from logged-in user
+    const citizenInfo = citizen || (this.userInfo ? {
+      mobileNumber: this.userInfo.mobileNumber || '0000000000',
+      name: this.userInfo.name,
+      type: 'CITIZEN',
+      roles: [{ code: 'CITIZEN', name: 'Citizen', tenantId: this.environment.stateTenantId }],
+      tenantId: this.environment.stateTenantId,
+    } : undefined);
+
     const data = await this.request<{ ServiceWrappers?: Record<string, unknown>[] }>(
       this.endpoint('PGR_CREATE'),
       {
         RequestInfo: this.buildRequestInfo(),
-        ServiceWrapper: {
-          service: {
-            tenantId,
-            serviceCode,
-            description,
-            address,
-            source: 'mcp-server',
-            active: true,
-          },
-          workflow: {
-            action: 'APPLY',
-          },
+        service: {
+          tenantId,
+          serviceCode,
+          description,
+          address: { tenantId, ...address },
+          citizen: citizenInfo,
+          source: 'web',
+          active: true,
+        },
+        workflow: {
+          action: 'APPLY',
         },
       }
     );

@@ -3,9 +3,13 @@ import type { Environment } from '../types/index.js';
 export const ENVIRONMENTS: Record<string, Environment> = {
   'chakshu-digit': {
     name: 'Chakshu Dev',
-    url: 'https://chakshu-digit.egov.theflywheel.in',
-    stateTenantId: 'statea',
+    url: 'https://api.egov.theflywheel.in',
+    stateTenantId: 'pg',
     description: 'Chakshu development environment (Flywheel)',
+    endpointOverrides: {
+      MDMS_SEARCH: '/mdms-v2/v2/_search',
+      MDMS_CREATE: '/mdms-v2/v2/_create',
+    },
   },
   dev: {
     name: 'Unified Dev',

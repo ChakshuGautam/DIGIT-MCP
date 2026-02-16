@@ -76,7 +76,7 @@ export function registerIdgenLocationTools(registry: ToolRegistry): void {
     category: 'location',
     risk: 'read',
     description:
-      'Search geographic boundaries using the egov-location service (legacy boundary API). Returns boundary hierarchy data for a tenant. Note: this service may not be available in all environments (e.g. local Docker).',
+      'Search geographic boundaries using the legacy egov-location service. This service is NOT available in all environments. For boundary data, prefer "validate_boundary" (boundary-service) which is available everywhere.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -102,22 +102,35 @@ export function registerIdgenLocationTools(registry: ToolRegistry): void {
       const boundaryType = args.boundary_type as string | undefined;
       const hierarchyType = args.hierarchy_type as string | undefined;
 
-      const boundaries = await digitApi.locationBoundarySearch(
-        tenantId,
-        boundaryType,
-        hierarchyType
-      );
-
-      return JSON.stringify(
-        {
-          success: true,
-          count: boundaries.length,
-          boundaries,
+      try {
+        const boundaries = await digitApi.locationBoundarySearch(
           tenantId,
-        },
-        null,
-        2
-      );
+          boundaryType,
+          hierarchyType
+        );
+
+        return JSON.stringify(
+          { success: true, count: boundaries.length, boundaries, tenantId },
+          null,
+          2
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const isDnsError = msg.includes('dns') || msg.includes('ENOTFOUND') || msg.includes('resolve');
+        return JSON.stringify({
+          success: false,
+          error: msg,
+          hint: isDnsError
+            ? 'The egov-location service is not deployed in this environment. ' +
+              'Use "validate_boundary" instead — it queries boundary-service which is available in all environments.'
+            : 'The egov-location service returned an error. ' +
+              'This is a legacy service. Use "validate_boundary" (boundary-service) as the preferred alternative.',
+          alternatives: [
+            { tool: 'validate_boundary', purpose: 'Read boundary hierarchy from boundary-service (recommended, works in all environments)' },
+            { tool: 'mdms_get_tenants', purpose: 'List available tenants to find correct tenant IDs' },
+          ],
+        }, null, 2);
+      }
     },
   } satisfies ToolMetadata);
 }

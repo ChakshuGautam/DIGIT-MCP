@@ -100,6 +100,61 @@ export function registerValidatorTools(registry: ToolRegistry): void {
     },
   } satisfies ToolMetadata);
 
+  registry.register({
+    name: 'boundary_hierarchy_search',
+    group: 'boundary',
+    category: 'validation',
+    risk: 'read',
+    description:
+      'Search boundary hierarchy definitions for a tenant. Returns the hierarchy type structure showing what boundary levels exist (e.g. Country > State > District > City > Ward > Locality). ' +
+      'Useful for understanding the boundary structure before creating or validating boundaries.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID to search hierarchy for',
+        },
+        hierarchy_type: {
+          type: 'string',
+          description: 'Filter by hierarchy type (e.g. "ADMIN"). Omit to list all hierarchies.',
+        },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      try {
+        const hierarchies = await digitApi.boundaryHierarchySearch(
+          args.tenant_id as string,
+          args.hierarchy_type as string | undefined
+        );
+
+        return JSON.stringify(
+          {
+            success: true,
+            tenantId: args.tenant_id,
+            count: hierarchies.length,
+            hierarchies,
+          },
+          null,
+          2
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return JSON.stringify({
+          success: false,
+          error: msg,
+          hint: 'Boundary hierarchy search failed. Use validate_boundary as an alternative to see the boundary tree for a tenant.',
+          alternatives: [
+            { tool: 'validate_boundary', purpose: 'Validate and view boundary tree for a tenant' },
+          ],
+        }, null, 2);
+      }
+    },
+  } satisfies ToolMetadata);
+
   // ──────────────────────────────────────────
   // masters group — departments, designations, complaint types
   // ──────────────────────────────────────────
@@ -540,17 +595,23 @@ export function registerValidatorTools(registry: ToolRegistry): void {
       const tenantId = args.tenant_id as string;
       const resourceDetails = args.resource_details as Record<string, unknown>;
 
-      const result = await digitApi.boundaryMgmtProcess(tenantId, resourceDetails);
-
-      return JSON.stringify(
-        {
-          success: true,
-          result,
-          tenantId,
-        },
-        null,
-        2
-      );
+      try {
+        const result = await digitApi.boundaryMgmtProcess(tenantId, resourceDetails);
+        return JSON.stringify({ success: true, result, tenantId }, null, 2);
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+          hint: 'The egov-bndry-mgmnt service returned an error. This service manages boundary data uploads/processing. ' +
+            'If you get "invalid path", this tenant has no processed boundary data in egov-bndry-mgmnt. ' +
+            'To read existing boundaries, use "validate_boundary" (boundary-service) instead. ' +
+            'Available tenants with boundaries can be found via "mdms_get_tenants".',
+          alternatives: [
+            { tool: 'validate_boundary', purpose: 'Read boundary hierarchy from boundary-service (most environments)' },
+            { tool: 'mdms_get_tenants', purpose: 'List available tenants to find correct tenant IDs' },
+          ],
+        }, null, 2);
+      }
     },
   } satisfies ToolMetadata);
 
@@ -560,7 +621,7 @@ export function registerValidatorTools(registry: ToolRegistry): void {
     category: 'boundary-mgmt',
     risk: 'read',
     description:
-      'Search for processed boundary data in the boundary management service (egov-bndry-mgmnt). Returns resource details of previously processed boundary uploads for a tenant.',
+      'Search for processed boundary data in the boundary management service (egov-bndry-mgmnt). Returns resource details of previously processed boundary uploads for a tenant. Note: if you just want to read boundary hierarchy data, use "validate_boundary" instead — it queries boundary-service which is available in all environments.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -575,18 +636,24 @@ export function registerValidatorTools(registry: ToolRegistry): void {
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;
-      const resources = await digitApi.boundaryMgmtSearch(tenantId);
 
-      return JSON.stringify(
-        {
-          success: true,
-          count: resources.length,
-          resources,
-          tenantId,
-        },
-        null,
-        2
-      );
+      try {
+        const resources = await digitApi.boundaryMgmtSearch(tenantId);
+        return JSON.stringify({ success: true, count: resources.length, resources, tenantId }, null, 2);
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+          hint: 'The egov-bndry-mgmnt service returned an error for this tenant. ' +
+            'This typically means no boundary data has been uploaded/processed for this tenant via egov-bndry-mgmnt. ' +
+            'To read existing boundary hierarchy data, use "validate_boundary" with the correct tenant ID instead. ' +
+            'Use "mdms_get_tenants" to list tenants and find the correct tenant ID (e.g. pg.citya, statea.f).',
+          alternatives: [
+            { tool: 'validate_boundary', purpose: 'Read boundary hierarchy from boundary-service (recommended)' },
+            { tool: 'mdms_get_tenants', purpose: 'List available tenants to find correct tenant IDs' },
+          ],
+        }, null, 2);
+      }
     },
   } satisfies ToolMetadata);
 
@@ -622,17 +689,22 @@ export function registerValidatorTools(registry: ToolRegistry): void {
       const tenantId = args.tenant_id as string;
       const resourceDetails = args.resource_details as Record<string, unknown>;
 
-      const result = await digitApi.boundaryMgmtGenerate(tenantId, resourceDetails);
-
-      return JSON.stringify(
-        {
-          success: true,
-          result,
-          tenantId,
-        },
-        null,
-        2
-      );
+      try {
+        const result = await digitApi.boundaryMgmtGenerate(tenantId, resourceDetails);
+        return JSON.stringify({ success: true, result, tenantId }, null, 2);
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+          hint: 'Boundary code generation failed. Ensure boundary data was first processed via "boundary_mgmt_process". ' +
+            'If you get "invalid path", this tenant has no data in egov-bndry-mgmnt. ' +
+            'To read existing boundaries, use "validate_boundary" instead.',
+          alternatives: [
+            { tool: 'validate_boundary', purpose: 'Read existing boundary hierarchy from boundary-service' },
+            { tool: 'boundary_mgmt_process', purpose: 'Upload/process boundary data first before generating codes' },
+          ],
+        }, null, 2);
+      }
     },
   } satisfies ToolMetadata);
 
@@ -642,7 +714,7 @@ export function registerValidatorTools(registry: ToolRegistry): void {
     category: 'boundary-mgmt',
     risk: 'read',
     description:
-      'Search/download generated boundary data from the boundary management service (egov-bndry-mgmnt). Returns resource details of boundary code generation results for a tenant.',
+      'Search/download generated boundary data from the boundary management service (egov-bndry-mgmnt). Returns resource details of boundary code generation results for a tenant. Note: if you just want to read boundary hierarchy data, use "validate_boundary" instead.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -657,18 +729,23 @@ export function registerValidatorTools(registry: ToolRegistry): void {
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;
-      const resources = await digitApi.boundaryMgmtDownload(tenantId);
 
-      return JSON.stringify(
-        {
-          success: true,
-          count: resources.length,
-          resources,
-          tenantId,
-        },
-        null,
-        2
-      );
+      try {
+        const resources = await digitApi.boundaryMgmtDownload(tenantId);
+        return JSON.stringify({ success: true, count: resources.length, resources, tenantId }, null, 2);
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+          hint: 'No generated boundary data found for this tenant in egov-bndry-mgmnt. ' +
+            'To read existing boundary hierarchy, use "validate_boundary" with the correct tenant ID. ' +
+            'Use "mdms_get_tenants" to list available tenants.',
+          alternatives: [
+            { tool: 'validate_boundary', purpose: 'Read boundary hierarchy from boundary-service (recommended)' },
+            { tool: 'mdms_get_tenants', purpose: 'List available tenants to find correct tenant IDs' },
+          ],
+        }, null, 2);
+      }
     },
   } satisfies ToolMetadata);
 }

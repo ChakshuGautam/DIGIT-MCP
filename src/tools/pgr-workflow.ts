@@ -76,17 +76,17 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
     category: 'pgr',
     risk: 'write',
     description:
-      'Create a new PGR complaint/service request. Requires tenant ID, a valid service code (from validate_complaint_types), description, and address with boundary info.',
+      'Create a new PGR complaint/service request. Requires tenant ID, a valid service code (from validate_complaint_types), description, address with boundary locality code, and citizen info (name + mobile number of the person filing the complaint).',
     inputSchema: {
       type: 'object' as const,
       properties: {
         tenant_id: {
           type: 'string',
-          description: 'Tenant ID',
+          description: 'Tenant ID (e.g. "pg.citya")',
         },
         service_code: {
           type: 'string',
-          description: 'Service code for the complaint type (e.g. "SL_WS")',
+          description: 'Service code for the complaint type (e.g. "StreetLightNotWorking"). Use validate_complaint_types to list valid codes.',
         },
         description: {
           type: 'string',
@@ -98,7 +98,7 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
             locality: {
               type: 'object',
               properties: {
-                code: { type: 'string', description: 'Locality boundary code' },
+                code: { type: 'string', description: 'Locality boundary code (use validate_boundary to find codes)' },
               },
               required: ['code'],
             },
@@ -107,35 +107,76 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
           required: ['locality'],
           description: 'Address with locality boundary code',
         },
+        citizen_name: {
+          type: 'string',
+          description: 'Name of the citizen filing the complaint (required)',
+        },
+        citizen_mobile: {
+          type: 'string',
+          description: 'Mobile number of the citizen (required, 10 digits)',
+        },
       },
-      required: ['tenant_id', 'service_code', 'description', 'address'],
+      required: ['tenant_id', 'service_code', 'description', 'address', 'citizen_name', 'citizen_mobile'],
     },
     handler: async (args) => {
       await ensureAuthenticated();
 
-      const result = await digitApi.pgrCreate(
-        args.tenant_id as string,
-        args.service_code as string,
-        args.description as string,
-        args.address as Record<string, unknown>
-      );
+      const tenantId = args.tenant_id as string;
+      const citizenName = args.citizen_name as string;
+      const citizenMobile = args.citizen_mobile as string;
+      const env = digitApi.getEnvironmentInfo();
 
-      const svc = (result.service || {}) as Record<string, unknown>;
+      const citizen = {
+        mobileNumber: citizenMobile,
+        name: citizenName,
+        type: 'CITIZEN',
+        roles: [{ code: 'CITIZEN', name: 'Citizen', tenantId: env.stateTenantId }],
+        tenantId: env.stateTenantId,
+      };
 
-      return JSON.stringify(
-        {
-          success: true,
-          message: `Complaint created: ${svc.serviceRequestId || 'unknown'}`,
-          complaint: {
-            serviceRequestId: svc.serviceRequestId,
-            serviceCode: svc.serviceCode,
-            status: svc.applicationStatus,
-            tenantId: svc.tenantId,
+      try {
+        const result = await digitApi.pgrCreate(
+          tenantId,
+          args.service_code as string,
+          args.description as string,
+          args.address as Record<string, unknown>,
+          citizen
+        );
+
+        const svc = (result.service || {}) as Record<string, unknown>;
+
+        return JSON.stringify(
+          {
+            success: true,
+            message: `Complaint created: ${svc.serviceRequestId || 'unknown'}`,
+            complaint: {
+              serviceRequestId: svc.serviceRequestId,
+              serviceCode: svc.serviceCode,
+              status: svc.applicationStatus,
+              tenantId: svc.tenantId,
+            },
           },
-        },
-        null,
-        2
-      );
+          null,
+          2
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const isAuthError = msg.includes('role') || msg.includes('authorized') || msg.includes('permission') || msg.includes('CITIZEN') || msg.includes('CSR');
+        return JSON.stringify({
+          success: false,
+          error: msg,
+          hint: isAuthError
+            ? 'The logged-in user may lack the required role. PGR complaint creation requires the authenticated user to have CITIZEN or CSR role for the APPLY workflow action. ' +
+              'Ensure the admin user has CSR role, or use credentials of a user with CITIZEN/CSR role.'
+            : 'Complaint creation failed. Verify: (1) service_code is valid (use validate_complaint_types), ' +
+              '(2) locality code exists (use validate_boundary), (3) tenant_id is a city-level tenant (e.g. pg.citya, not pg).',
+          alternatives: [
+            { tool: 'validate_complaint_types', purpose: 'List valid service codes for the tenant' },
+            { tool: 'validate_boundary', purpose: 'Find valid locality boundary codes' },
+            { tool: 'workflow_business_services', purpose: 'Check PGR workflow roles and actions' },
+          ],
+        }, null, 2);
+      }
     },
   } satisfies ToolMetadata);
 

@@ -27,7 +27,7 @@ if (transportMode === 'stdio') {
 
     // MCP endpoint — stateless mode for horizontal scaling
     if (url === '/mcp') {
-      const server = createServer();
+      const server = createServer({ enableAllGroups: true });
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined, // stateless
       });

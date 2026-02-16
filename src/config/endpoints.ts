@@ -1,8 +1,9 @@
 // DIGIT API endpoint paths
 export const ENDPOINTS = {
-  // Authentication
+  // Authentication / User
   AUTH: '/user/oauth/token',
   USER_SEARCH: '/user/_search',
+  USER_CREATE: '/user/users/_createnovalidate',
 
   // MDMS v2
   MDMS_SEARCH: '/egov-mdms-service/v2/_search',
@@ -14,6 +15,8 @@ export const ENDPOINTS = {
 
   // HRMS
   HRMS_EMPLOYEES_SEARCH: '/egov-hrms/employees/_search',
+  HRMS_EMPLOYEES_CREATE: '/egov-hrms/employees/_create',
+  HRMS_EMPLOYEES_UPDATE: '/egov-hrms/employees/_update',
 
   // Localization
   LOCALIZATION_SEARCH: '/localization/messages/v1/_search',

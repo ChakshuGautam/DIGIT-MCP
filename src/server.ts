@@ -5,10 +5,19 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { ToolRegistry } from './tools/registry.js';
 import { registerAllTools } from './tools/index.js';
+import { ALL_GROUPS } from './types/index.js';
 
-export function createServer(): Server {
+export interface CreateServerOptions {
+  enableAllGroups?: boolean;
+}
+
+export function createServer(options?: CreateServerOptions): Server {
   const registry = new ToolRegistry();
   registerAllTools(registry);
+
+  if (options?.enableAllGroups) {
+    registry.enableGroups(ALL_GROUPS);
+  }
 
   const server = new Server(
     {

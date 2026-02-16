@@ -53,6 +53,80 @@ export function registerFilestoreAclTools(registry: ToolRegistry): void {
     },
   } satisfies ToolMetadata);
 
+  registry.register({
+    name: 'filestore_upload',
+    group: 'admin',
+    category: 'filestore',
+    risk: 'write',
+    description:
+      'Upload a file to DIGIT filestore. Accepts base64-encoded file content, a filename, and a module name. ' +
+      'Returns the fileStoreId which can be used with other tools (e.g. boundary_mgmt_process). ' +
+      'Common modules: "PGR" for complaint attachments, "HRMS" for employee documents, "boundary" for boundary data files.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID',
+        },
+        module: {
+          type: 'string',
+          description: 'Module name (e.g. "PGR", "HRMS", "boundary", "rainmaker-pgr")',
+        },
+        file_name: {
+          type: 'string',
+          description: 'File name with extension (e.g. "boundaries.xlsx", "photo.jpg")',
+        },
+        file_content_base64: {
+          type: 'string',
+          description: 'Base64-encoded file content',
+        },
+        content_type: {
+          type: 'string',
+          description: 'MIME type (e.g. "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "image/jpeg"). Default: "application/octet-stream"',
+        },
+      },
+      required: ['tenant_id', 'module', 'file_name', 'file_content_base64'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const fileBuffer = Buffer.from(args.file_content_base64 as string, 'base64');
+      const contentType = (args.content_type as string) || 'application/octet-stream';
+
+      try {
+        const files = await digitApi.filestoreUpload(
+          args.tenant_id as string,
+          args.module as string,
+          fileBuffer,
+          args.file_name as string,
+          contentType
+        );
+
+        return JSON.stringify(
+          {
+            success: true,
+            message: `File "${args.file_name}" uploaded`,
+            count: files.length,
+            files: files.map((f) => ({
+              fileStoreId: f.fileStoreId,
+              tenantId: f.tenantId,
+            })),
+          },
+          null,
+          2
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return JSON.stringify({
+          success: false,
+          error: msg,
+          hint: 'File upload failed. Verify: (1) tenant_id is valid, (2) module name matches expected values, (3) file content is valid base64.',
+        }, null, 2);
+      }
+    },
+  } satisfies ToolMetadata);
+
   // ──────────────────────────────────────────
   // Access Control tools
   // ──────────────────────────────────────────

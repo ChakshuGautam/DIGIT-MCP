@@ -8,6 +8,8 @@ import { registerFilestoreAclTools } from './filestore-acl.js';
 import { registerIdgenLocationTools } from './idgen-location.js';
 import { registerEncryptionTools } from './encryption.js';
 import { registerHealthCheckTools } from './health-check.js';
+import { registerHrmsTools } from './hrms.js';
+import { registerUserTools } from './user.js';
 
 export function registerAllTools(registry: ToolRegistry): void {
   registerDiscoverTools(registry);
@@ -19,4 +21,6 @@ export function registerAllTools(registry: ToolRegistry): void {
   registerIdgenLocationTools(registry);
   registerEncryptionTools(registry);
   registerHealthCheckTools(registry);
+  registerHrmsTools(registry);
+  registerUserTools(registry);
 }
