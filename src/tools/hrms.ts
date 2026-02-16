@@ -106,10 +106,13 @@ export function registerHrmsTools(registry: ToolRegistry): void {
         IsActive: true,
         user: {
           name: args.name as string,
+          userName: args.mobile_number as string,
           mobileNumber: args.mobile_number as string,
+          password: 'eGov@123',
           emailId: (args.email as string) || null,
           gender: (args.gender as string) || null,
           type: 'EMPLOYEE',
+          active: true,
           roles,
           tenantId: env.stateTenantId,
         },
@@ -164,17 +167,36 @@ export function registerHrmsTools(registry: ToolRegistry): void {
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         const isDuplicate = msg.includes('already exists') || msg.includes('duplicate') || msg.includes('ALREADY_ACTIVE');
+        const isIdgenError = msg.includes('Unable to create ids') || msg.includes('citycode') || msg.includes('idgen') || msg.includes('UnrecognizedPropertyException') || msg.includes('ResponseInfo');
+        const isUserError = msg.includes('InvalidUserCreate') || msg.includes('user') || msg.includes('mobile');
+
+        let hint: string;
+        if (isDuplicate) {
+          hint = 'An employee with this mobile number may already exist for this tenant. Use validate_employees to search existing employees.';
+        } else if (isIdgenError) {
+          hint = `Employee ID generation failed for tenant "${tenantId}". This usually means the tenant code does not follow the "{state}.{city}" naming convention ` +
+            `(e.g. "pg.citya" where "pg" is a valid state tenant). The idgen service derives the state from the tenant code prefix and looks up city code from MDMS. ` +
+            `Verify: (1) the tenant code prefix matches an existing state-level tenant in MDMS (use mdms_get_tenants), ` +
+            `(2) the tenant record has a valid city.code field. ` +
+            `If the tenant naming cannot be changed, use a custom idgen format without [city] placeholder via idgen_generate, then create the employee with a pre-generated code.`;
+        } else if (isUserError) {
+          hint = 'The underlying user creation failed. The mobile number may already be registered, or the user service rejected the request. ' +
+            'Use user_search to check if a user with this mobile number already exists.';
+        } else {
+          hint = 'Employee creation failed. Verify: (1) department code is valid (use validate_departments), ' +
+            '(2) designation code is valid (use validate_designations), ' +
+            '(3) role codes are valid (use access_roles_search), ' +
+            '(4) boundary code exists (use validate_boundary).';
+        }
+
         return JSON.stringify({
           success: false,
           error: msg,
-          hint: isDuplicate
-            ? 'An employee with this mobile number may already exist for this tenant. Use validate_employees to search existing employees.'
-            : 'Employee creation failed. Verify: (1) department code is valid (use validate_departments), ' +
-              '(2) designation code is valid (use validate_designations), ' +
-              '(3) role codes are valid (use access_roles_search), ' +
-              '(4) boundary code exists (use validate_boundary).',
+          hint,
           alternatives: [
             { tool: 'validate_employees', purpose: 'Search existing employees for the tenant' },
+            { tool: 'mdms_get_tenants', purpose: 'List all tenants and verify tenant hierarchy' },
+            { tool: 'user_search', purpose: 'Check if a user with this mobile number exists' },
             { tool: 'validate_departments', purpose: 'List valid department codes' },
             { tool: 'validate_designations', purpose: 'List valid designation codes' },
             { tool: 'access_roles_search', purpose: 'List valid role codes' },
