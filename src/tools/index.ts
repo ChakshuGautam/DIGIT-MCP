@@ -5,6 +5,8 @@ import { registerValidatorTools } from './validators.js';
 import { registerLocalizationTools } from './localization.js';
 import { registerPgrWorkflowTools } from './pgr-workflow.js';
 import { registerFilestoreAclTools } from './filestore-acl.js';
+import { registerIdgenLocationTools } from './idgen-location.js';
+import { registerEncryptionTools } from './encryption.js';
 
 export function registerAllTools(registry: ToolRegistry): void {
   registerDiscoverTools(registry);
@@ -13,4 +15,6 @@ export function registerAllTools(registry: ToolRegistry): void {
   registerLocalizationTools(registry);
   registerPgrWorkflowTools(registry);
   registerFilestoreAclTools(registry);
+  registerIdgenLocationTools(registry);
+  registerEncryptionTools(registry);
 }

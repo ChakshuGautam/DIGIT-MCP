@@ -35,6 +35,22 @@ export const ENDPOINTS = {
   // Access Control
   ACCESS_ROLES_SEARCH: '/access/v1/roles/_search',
   ACCESS_ACTIONS_SEARCH: '/access/v1/actions/_search',
+
+  // ID Generation
+  IDGEN_GENERATE: '/egov-idgen/id/_generate',
+
+  // Location
+  LOCATION_BOUNDARY_SEARCH: '/egov-location/location/v11/boundarys/_search',
+
+  // Encryption
+  ENC_ENCRYPT: '/egov-enc-service/crypto/v1/_encrypt',
+  ENC_DECRYPT: '/egov-enc-service/crypto/v1/_decrypt',
+
+  // Boundary Management
+  BNDRY_MGMT_PROCESS: '/egov-bndry-mgmnt/v1/_process',
+  BNDRY_MGMT_GENERATE: '/egov-bndry-mgmnt/v1/_generate',
+  BNDRY_MGMT_PROCESS_SEARCH: '/egov-bndry-mgmnt/v1/_process-search',
+  BNDRY_MGMT_GENERATE_SEARCH: '/egov-bndry-mgmnt/v1/_generate-search',
 } as const;
 
 // OAuth credentials

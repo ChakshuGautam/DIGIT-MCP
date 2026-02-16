@@ -29,7 +29,7 @@ async function main() {
   registerAllTools(registry);
 
   // Enable all groups for testing
-  registry.enableGroups(['mdms', 'boundary', 'masters', 'employees', 'localization', 'pgr', 'admin']);
+  registry.enableGroups(['mdms', 'boundary', 'masters', 'employees', 'localization', 'pgr', 'admin', 'idgen', 'location', 'encryption']);
 
   const call = async (toolName: string, args: Record<string, unknown> = {}) => {
     const tool = registry.getTool(toolName);
@@ -174,6 +174,44 @@ async function main() {
     if (!result.success) throw new Error('failed');
     console.log(`         Found ${result.count} role(s)`);
   });
+
+  // ── idgen_generate ──
+  await test('idgen_generate', async () => {
+    const result = await call('idgen_generate', {
+      tenant_id: stateTenantId,
+      id_name: 'pgr.servicerequestid',
+    });
+    if (!result.success) throw new Error('failed');
+    console.log(`         Generated ID: ${result.ids?.[0] || 'none'}`);
+  });
+
+  // ── encrypt_data ──
+  await test('encrypt_data', async () => {
+    const result = await call('encrypt_data', {
+      tenant_id: stateTenantId,
+      values: ['test-value-123'],
+    });
+    if (!result.success) throw new Error('failed');
+    console.log(`         Encrypted ${result.count} value(s): ${result.encrypted?.[0]?.substring(0, 30)}...`);
+  });
+
+  // ── boundary_mgmt_search ──
+  await test('boundary_mgmt_search', async () => {
+    const result = await call('boundary_mgmt_search', { tenant_id: tenantId });
+    if (!result.success) throw new Error('failed');
+    console.log(`         Found ${result.count} boundary resource(s)`);
+  });
+
+  // ── location_search (may not be available in all envs) ──
+  if (targetEnv !== 'local') {
+    await test('location_search', async () => {
+      const result = await call('location_search', { tenant_id: tenantId });
+      if (!result.success) throw new Error('failed');
+      console.log(`         Found ${result.count} boundary(s)`);
+    });
+  } else {
+    console.log(`  SKIP  location_search (not available in local env)`);
+  }
 
   // ── Summary ──
   console.log('\n=== Results ===');

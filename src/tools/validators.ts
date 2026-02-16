@@ -501,6 +501,176 @@ export function registerValidatorTools(registry: ToolRegistry): void {
       );
     },
   } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // boundary group — boundary management tools
+  // ──────────────────────────────────────────
+
+  registry.register({
+    name: 'boundary_mgmt_process',
+    group: 'boundary',
+    category: 'boundary-mgmt',
+    risk: 'write',
+    description:
+      'Process (upload/update) boundary data via the boundary management service (egov-bndry-mgmnt). Submits resource details for boundary data processing. Requires a file with boundary data to be uploaded first via filestore.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID for boundary processing',
+        },
+        resource_details: {
+          type: 'object',
+          description: 'Resource details object containing file information, boundary type, hierarchy type, and action',
+          properties: {
+            type: { type: 'string', description: 'Resource type (e.g. "boundary")' },
+            fileStoreId: { type: 'string', description: 'Filestore ID of the uploaded boundary file' },
+            action: { type: 'string', description: 'Action to perform (e.g. "create", "update")' },
+            hierarchyType: { type: 'string', description: 'Hierarchy type (e.g. "ADMIN")' },
+            tenantId: { type: 'string', description: 'Tenant ID for the boundary data' },
+          },
+        },
+      },
+      required: ['tenant_id', 'resource_details'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const resourceDetails = args.resource_details as Record<string, unknown>;
+
+      const result = await digitApi.boundaryMgmtProcess(tenantId, resourceDetails);
+
+      return JSON.stringify(
+        {
+          success: true,
+          result,
+          tenantId,
+        },
+        null,
+        2
+      );
+    },
+  } satisfies ToolMetadata);
+
+  registry.register({
+    name: 'boundary_mgmt_search',
+    group: 'boundary',
+    category: 'boundary-mgmt',
+    risk: 'read',
+    description:
+      'Search for processed boundary data in the boundary management service (egov-bndry-mgmnt). Returns resource details of previously processed boundary uploads for a tenant.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID to search boundary processes for',
+        },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const resources = await digitApi.boundaryMgmtSearch(tenantId);
+
+      return JSON.stringify(
+        {
+          success: true,
+          count: resources.length,
+          resources,
+          tenantId,
+        },
+        null,
+        2
+      );
+    },
+  } satisfies ToolMetadata);
+
+  registry.register({
+    name: 'boundary_mgmt_generate',
+    group: 'boundary',
+    category: 'boundary-mgmt',
+    risk: 'write',
+    description:
+      'Generate boundary codes via the boundary management service (egov-bndry-mgmnt). Creates boundary code mappings based on resource details. Typically used after processing boundary data.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID for boundary code generation',
+        },
+        resource_details: {
+          type: 'object',
+          description: 'Resource details for boundary generation (type, hierarchy, tenant)',
+          properties: {
+            type: { type: 'string', description: 'Resource type (e.g. "boundary")' },
+            hierarchyType: { type: 'string', description: 'Hierarchy type (e.g. "ADMIN")' },
+            tenantId: { type: 'string', description: 'Tenant ID for the boundary data' },
+          },
+        },
+      },
+      required: ['tenant_id', 'resource_details'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const resourceDetails = args.resource_details as Record<string, unknown>;
+
+      const result = await digitApi.boundaryMgmtGenerate(tenantId, resourceDetails);
+
+      return JSON.stringify(
+        {
+          success: true,
+          result,
+          tenantId,
+        },
+        null,
+        2
+      );
+    },
+  } satisfies ToolMetadata);
+
+  registry.register({
+    name: 'boundary_mgmt_download',
+    group: 'boundary',
+    category: 'boundary-mgmt',
+    risk: 'read',
+    description:
+      'Search/download generated boundary data from the boundary management service (egov-bndry-mgmnt). Returns resource details of boundary code generation results for a tenant.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID to search generated boundaries for',
+        },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const resources = await digitApi.boundaryMgmtDownload(tenantId);
+
+      return JSON.stringify(
+        {
+          success: true,
+          count: resources.length,
+          resources,
+          tenantId,
+        },
+        null,
+        2
+      );
+    },
+  } satisfies ToolMetadata);
 }
 
 // Auto-login helper

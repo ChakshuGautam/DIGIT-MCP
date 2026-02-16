@@ -428,6 +428,148 @@ class DigitApiClient {
 
     return data.actions || [];
   }
+
+  // ID Generation — generate IDs using configured formats
+  async idgenGenerate(
+    tenantId: string,
+    idRequests: { idName: string; tenantId?: string; format?: string }[]
+  ): Promise<{ id: string }[]> {
+    const data = await this.request<{ idResponses?: { id: string }[] }>(
+      this.endpoint('IDGEN_GENERATE'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        idRequests: idRequests.map((r) => ({
+          idName: r.idName,
+          tenantId: r.tenantId || tenantId,
+          format: r.format,
+        })),
+      }
+    );
+
+    return data.idResponses || [];
+  }
+
+  // Location — search boundaries via egov-location service
+  async locationBoundarySearch(
+    tenantId: string,
+    boundaryType?: string,
+    hierarchyType?: string
+  ): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ TenantBoundary?: Record<string, unknown>[] }>(
+      this.endpoint('LOCATION_BOUNDARY_SEARCH'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        tenantId,
+        boundaryType,
+        hierarchyType,
+      }
+    );
+
+    return data.TenantBoundary || [];
+  }
+
+  // Encryption — encrypt values (no RequestInfo needed)
+  async encryptData(
+    tenantId: string,
+    values: string[]
+  ): Promise<string[]> {
+    const data = await this.request<string[]>(
+      this.endpoint('ENC_ENCRYPT'),
+      {
+        encryptionRequests: values.map((value) => ({
+          tenantId,
+          type: 'Normal',
+          value,
+        })),
+      }
+    );
+
+    // The response is a flat array of encrypted strings
+    return Array.isArray(data) ? data : [];
+  }
+
+  // Decryption — decrypt encrypted values (no RequestInfo needed)
+  async decryptData(
+    tenantId: string,
+    encryptedValues: string[]
+  ): Promise<string[]> {
+    const data = await this.request<string[]>(
+      this.endpoint('ENC_DECRYPT'),
+      {
+        decryptionRequests: encryptedValues.map((value) => ({
+          tenantId,
+          type: 'Normal',
+          value,
+        })),
+      }
+    );
+
+    return Array.isArray(data) ? data : [];
+  }
+
+  // Boundary Management — process (upload/update boundary data)
+  async boundaryMgmtProcess(
+    tenantId: string,
+    resourceDetails: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams({ tenantId });
+    const data = await this.request<Record<string, unknown>>(
+      `${this.endpoint('BNDRY_MGMT_PROCESS')}?${params.toString()}`,
+      {
+        RequestInfo: this.buildRequestInfo(),
+        ResourceDetails: resourceDetails,
+      }
+    );
+
+    return data;
+  }
+
+  // Boundary Management — search processed boundaries
+  async boundaryMgmtSearch(
+    tenantId: string
+  ): Promise<Record<string, unknown>[]> {
+    const params = new URLSearchParams({ tenantId });
+    const data = await this.request<{ ResourceDetails?: Record<string, unknown>[] }>(
+      `${this.endpoint('BNDRY_MGMT_PROCESS_SEARCH')}?${params.toString()}`,
+      {
+        RequestInfo: this.buildRequestInfo(),
+      }
+    );
+
+    return data.ResourceDetails || [];
+  }
+
+  // Boundary Management — generate boundary codes
+  async boundaryMgmtGenerate(
+    tenantId: string,
+    resourceDetails: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams({ tenantId });
+    const data = await this.request<Record<string, unknown>>(
+      `${this.endpoint('BNDRY_MGMT_GENERATE')}?${params.toString()}`,
+      {
+        RequestInfo: this.buildRequestInfo(),
+        ResourceDetails: resourceDetails,
+      }
+    );
+
+    return data;
+  }
+
+  // Boundary Management — download/search generated boundaries
+  async boundaryMgmtDownload(
+    tenantId: string
+  ): Promise<Record<string, unknown>[]> {
+    const params = new URLSearchParams({ tenantId });
+    const data = await this.request<{ ResourceDetails?: Record<string, unknown>[] }>(
+      `${this.endpoint('BNDRY_MGMT_GENERATE_SEARCH')}?${params.toString()}`,
+      {
+        RequestInfo: this.buildRequestInfo(),
+      }
+    );
+
+    return data.ResourceDetails || [];
+  }
 }
 
 // Singleton

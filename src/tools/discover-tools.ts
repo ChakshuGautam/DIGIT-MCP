@@ -22,7 +22,7 @@ export function registerDiscoverTools(registry: ToolRegistry): void {
           message: `${summary.enabledTools} of ${summary.totalTools} tools enabled`,
           groups: summary.groups,
           usage:
-            'Call enable_tools with group names to load more tools. Groups: mdms (tenant validation + MDMS CRUD), boundary (boundary hierarchy), masters (departments, designations, complaint types), employees (HRMS), localization (UI labels), pgr (complaints + workflow), admin (filestore + access control).',
+            'Call enable_tools with group names to load more tools. Groups: mdms (tenant validation + MDMS CRUD), boundary (boundary hierarchy + boundary management), masters (departments, designations, complaint types), employees (HRMS), localization (UI labels), pgr (complaints + workflow), admin (filestore + access control), idgen (ID generation), location (geographic boundaries), encryption (encrypt/decrypt data).',
         },
         null,
         2
@@ -36,7 +36,7 @@ export function registerDiscoverTools(registry: ToolRegistry): void {
     category: 'discovery',
     risk: 'read',
     description:
-      'Enable or disable tool groups on demand. Groups: mdms (tenant validation + MDMS search/create), boundary (boundary validation), masters (departments, designations, complaint types), employees (HRMS employee validation), localization (search/upsert UI labels), pgr (PGR complaints + workflow), admin (filestore + access control). The "core" group is always enabled.',
+      'Enable or disable tool groups on demand. Groups: mdms (tenant validation + MDMS search/create), boundary (boundary hierarchy + boundary management CRUD), masters (departments, designations, complaint types), employees (HRMS employee validation), localization (search/upsert UI labels), pgr (PGR complaints + workflow), admin (filestore + access control), idgen (ID generation), location (geographic boundaries), encryption (encrypt/decrypt). The "core" group is always enabled.',
     inputSchema: {
       type: 'object' as const,
       properties: {

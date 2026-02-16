@@ -1,6 +1,6 @@
 # DIGIT MCP Server
 
-MCP server for interacting with DIGIT platform APIs with **progressive disclosure** — 5 core tools load initially, with 18 more available on-demand across 7 domain groups.
+MCP server for interacting with DIGIT platform APIs with **progressive disclosure** — 5 core tools load initially, with 26 more available on-demand across 10 domain groups.
 
 ## Quick Start
 
@@ -19,16 +19,19 @@ The server starts with 5 core tools. Additional tools are unlocked by calling `e
 |-------|-------|---------|
 | **core** (always on) | `discover_tools`, `enable_tools`, `configure`, `get_environment_info`, `mdms_get_tenants` | Discovery + environment + auth |
 | **mdms** | `validate_tenant`, `mdms_search`, `mdms_create` | Tenant validation + MDMS v2 CRUD |
-| **boundary** | `validate_boundary` | Boundary hierarchy validation |
+| **boundary** | `validate_boundary`, `boundary_mgmt_process`, `boundary_mgmt_search`, `boundary_mgmt_generate`, `boundary_mgmt_download` | Boundary hierarchy validation + boundary management CRUD |
 | **masters** | `validate_departments`, `validate_designations`, `validate_complaint_types` | Department, designation, PGR service def validation |
 | **employees** | `validate_employees` | HRMS employee validation |
 | **localization** | `localization_search`, `localization_upsert` | UI label search + create/update |
 | **pgr** | `pgr_search`, `pgr_create`, `pgr_update`, `workflow_business_services`, `workflow_process_search` | PGR complaints + workflow state machine |
 | **admin** | `filestore_get_urls`, `access_roles_search`, `access_actions_search` | Filestore URLs + access control roles/actions |
+| **idgen** | `idgen_generate` | ID generation (complaint numbers, application IDs) |
+| **location** | `location_search` | Geographic boundary search (legacy egov-location) |
+| **encryption** | `encrypt_data`, `decrypt_data` | Encrypt/decrypt sensitive data |
 
 When groups are enabled/disabled, the server sends `tools/list_changed` notifications so the MCP client re-fetches the tool list.
 
-## All 23 Tools
+## All 31 Tools
 
 | # | Tool | Group | Risk | DIGIT Service | Description |
 |---|------|-------|------|---------------|-------------|
@@ -55,10 +58,18 @@ When groups are enabled/disabled, the server sends `tools/list_changed` notifica
 | 21 | `filestore_get_urls` | admin | read | egov-filestore | Get download URLs for filestore IDs |
 | 22 | `access_roles_search` | admin | read | egov-accesscontrol | Search all defined roles |
 | 23 | `access_actions_search` | admin | read | egov-accesscontrol | Search actions/permissions by role |
+| 24 | `idgen_generate` | idgen | write | egov-idgen | Generate unique formatted IDs |
+| 25 | `location_search` | location | read | egov-location | Search geographic boundaries (legacy) |
+| 26 | `encrypt_data` | encryption | write | egov-enc-service | Encrypt sensitive data values |
+| 27 | `decrypt_data` | encryption | write | egov-enc-service | Decrypt encrypted data values |
+| 28 | `boundary_mgmt_process` | boundary | write | egov-bndry-mgmnt | Process/upload boundary data |
+| 29 | `boundary_mgmt_search` | boundary | read | egov-bndry-mgmnt | Search processed boundary data |
+| 30 | `boundary_mgmt_generate` | boundary | write | egov-bndry-mgmnt | Generate boundary codes |
+| 31 | `boundary_mgmt_download` | boundary | read | egov-bndry-mgmnt | Search/download generated boundaries |
 
 ## DIGIT API Coverage
 
-### Covered Services (11 of 16)
+### All Services Covered (16 of 16)
 
 | Kong Route | DIGIT Service | MCP Tools | Endpoints Used |
 |------------|--------------|-----------|----------------|
@@ -71,16 +82,11 @@ When groups are enabled/disabled, the server sends `tools/list_changed` notifica
 | `/egov-workflow-v2` | egov-workflow-v2 | `workflow_business_services`, `workflow_process_search` | `/egov-wf/businessservice/_search`, `/egov-wf/process/_search` |
 | `/filestore` | egov-filestore | `filestore_get_urls` | `/v1/files/url` |
 | `/access` | egov-accesscontrol | `access_roles_search`, `access_actions_search` | `/v1/roles/_search`, `/v1/actions/_search` |
-
-### Not Covered (5 of 16)
-
-| Kong Route | DIGIT Service | Reason |
-|------------|--------------|--------|
-| `/egov-idgen` | egov-idgen | Internal service — ID generation is called by other services, not directly by users |
-| `/egov-location` | egov-location | Geo-location/mapping service — not needed for CRS validation |
-| `/common-persist` | egov-persister | Internal service — persister is an async event consumer, no user-facing API |
-| `/egov-enc-service` | egov-enc-service | Internal service — encryption is called by other services transparently |
-| `/egov-bndry-mgmnt` | egov-bndry-mgmnt | Boundary management CRUD — covered indirectly via boundary-service search |
+| `/egov-idgen` | egov-idgen | `idgen_generate` | `/id/_generate` |
+| `/egov-location` | egov-location | `location_search` | `/location/v11/boundarys/_search` |
+| `/egov-enc-service` | egov-enc-service | `encrypt_data`, `decrypt_data` | `/crypto/v1/_encrypt`, `/crypto/v1/_decrypt` |
+| `/egov-bndry-mgmnt` | egov-bndry-mgmnt | `boundary_mgmt_process`, `boundary_mgmt_search`, `boundary_mgmt_generate`, `boundary_mgmt_download` | `/v1/_process`, `/v1/_process-search`, `/v1/_generate`, `/v1/_generate-search` |
+| `/common-persist` | egov-persister | — (Kafka consumer) | No HTTP API — async event consumer that persists data to PostgreSQL |
 
 ### Infrastructure (not applicable)
 
@@ -89,6 +95,10 @@ When groups are enabled/disabled, the server sends `tools/list_changed` notifica
 | `/digit-ui` | digit-ui | Frontend web application |
 | `/jupyter` | digit-jupyter | Jupyter notebook development tool |
 | `/health/*` | various | Health check endpoints (5 routes) |
+
+### OpenAPI Specification
+
+Full API documentation is available at [`docs/openapi.yaml`](docs/openapi.yaml) — an OpenAPI 3.0 spec covering all 26 DIGIT API endpoints across 13 services with HTTP APIs.
 
 ## Environment Variables
 
@@ -139,14 +149,18 @@ src/
 │   ├── environments.ts       # Environment configs (dev, local, chakshu-digit)
 │   └── endpoints.ts          # DIGIT API endpoint paths + OAuth config
 ├── services/
-│   └── digit-api.ts          # DIGIT API client (auth, MDMS, PGR, HRMS, etc.)
+│   └── digit-api.ts          # DIGIT API client (auth, MDMS, PGR, HRMS, idgen, encryption, etc.)
 └── tools/
     ├── registry.ts           # ToolRegistry (group mgmt, enable/disable, summary)
     ├── discover-tools.ts     # discover_tools + enable_tools (meta-tools)
     ├── mdms-tenant.ts        # configure, get_environment_info, mdms_get_tenants, validate_tenant, mdms_search, mdms_create
-    ├── validators.ts         # validate_boundary, validate_departments, validate_designations, validate_complaint_types, validate_employees
+    ├── validators.ts         # validate_boundary, validate_departments, validate_designations, validate_complaint_types, validate_employees, boundary_mgmt_*
     ├── localization.ts       # localization_search, localization_upsert
     ├── pgr-workflow.ts       # pgr_search, pgr_create, pgr_update, workflow_business_services, workflow_process_search
     ├── filestore-acl.ts      # filestore_get_urls, access_roles_search, access_actions_search
+    ├── idgen-location.ts     # idgen_generate, location_search
+    ├── encryption.ts         # encrypt_data, decrypt_data
     └── index.ts              # Aggregator: registerAllTools()
+docs/
+└── openapi.yaml              # OpenAPI 3.0 spec for all DIGIT API endpoints
 ```
