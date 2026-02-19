@@ -11,22 +11,6 @@ export const ENVIRONMENTS: Record<string, Environment> = {
       MDMS_CREATE: '/mdms-v2/v2/_create',
     },
   },
-  dev: {
-    name: 'Unified Dev',
-    url: 'https://unified-dev.digit.org',
-    stateTenantId: 'statea',
-    description: 'DIGIT unified development environment',
-  },
-  local: {
-    name: 'Local',
-    url: 'http://0.0.0.0:18000',
-    stateTenantId: 'pg',
-    description: 'Local Docker compose (Kong gateway on port 18000)',
-    endpointOverrides: {
-      MDMS_SEARCH: '/mdms-v2/v2/_search',
-      MDMS_CREATE: '/mdms-v2/v2/_create',
-    },
-  },
 };
 
 export function getEnvironment(envKey?: string): Environment {

@@ -4,6 +4,73 @@ import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
 import { ENVIRONMENTS } from '../config/environments.js';
 
+/**
+ * Search for MDMS records across all state tenants.
+ * First queries the default state tenant to discover all root-level tenants,
+ * then queries each discovered root to get the complete set.
+ */
+async function searchAllStateTenants(
+  defaultStateTenantId: string,
+  schemaCode: string,
+  filterState?: string
+): Promise<Record<string, unknown>[]> {
+  // If filtering to a specific state, just search that one
+  if (filterState) {
+    return digitApi.mdmsV2Search<Record<string, unknown>>(filterState, schemaCode);
+  }
+
+  // First search under the default state tenant
+  const defaultResults = await digitApi.mdmsV2Search<Record<string, unknown>>(
+    defaultStateTenantId,
+    schemaCode
+  );
+
+  // Discover all state-level tenant roots from:
+  // 1. The default state tenant
+  // 2. Tenant codes found in the default search results
+  // 3. Tenant IDs from the logged-in user's roles (covers cross-tenant admins)
+  const knownRoots = new Set<string>();
+  knownRoots.add(defaultStateTenantId);
+  for (const t of defaultResults) {
+    const code = t.code as string;
+    if (code) {
+      const root = code.includes('.') ? code.split('.')[0] : code;
+      knownRoots.add(root);
+    }
+  }
+  // Also check roles — the user may have roles on state tenants not in pg's MDMS
+  const auth = digitApi.getAuthInfo();
+  if (auth.user?.roles) {
+    for (const role of auth.user.roles) {
+      if (role.tenantId) {
+        const root = role.tenantId.includes('.') ? role.tenantId.split('.')[0] : role.tenantId;
+        knownRoots.add(root);
+      }
+    }
+  }
+
+  // Query each discovered root that differs from the default
+  const allResults = [...defaultResults];
+  const seenCodes = new Set(defaultResults.map((t) => t.code as string));
+
+  for (const root of knownRoots) {
+    if (root === defaultStateTenantId) continue;
+    try {
+      const results = await digitApi.mdmsV2Search<Record<string, unknown>>(root, schemaCode);
+      for (const t of results) {
+        if (!seenCodes.has(t.code as string)) {
+          allResults.push(t);
+          seenCodes.add(t.code as string);
+        }
+      }
+    } catch {
+      // Skip unreachable state tenants
+    }
+  }
+
+  return allResults;
+}
+
 export function registerMdmsTenantTools(registry: ToolRegistry): void {
   // ──────────────────────────────────────────
   // core group
@@ -190,20 +257,20 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
     },
   } satisfies ToolMetadata);
 
-  // mdms_get_tenants — list tenants from MDMS
+  // mdms_get_tenants — list tenants from MDMS (all state tenants)
   registry.register({
     name: 'mdms_get_tenants',
     group: 'core',
     category: 'mdms',
     risk: 'read',
     description:
-      'Fetch all tenant records from MDMS for the current environment. Returns tenant codes, names, and city info. Requires authentication — will attempt auto-login using CRS_USERNAME/CRS_PASSWORD env vars if not authenticated.',
+      'Fetch all tenant records from MDMS across all state tenants. Returns tenant codes, names, and city info. Requires authentication — will attempt auto-login using CRS_USERNAME/CRS_PASSWORD env vars if not authenticated.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         state_tenant_id: {
           type: 'string',
-          description: 'State-level tenant ID to query (default: from environment config)',
+          description: 'Filter to a specific state tenant (default: return all)',
         },
       },
     },
@@ -211,20 +278,21 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       await ensureAuthenticated();
 
       const env = digitApi.getEnvironmentInfo();
-      const stateTenantId = (args.state_tenant_id as string) || env.stateTenantId;
+      const filterState = args.state_tenant_id as string | undefined;
 
-      const tenants = await digitApi.mdmsV2Search<Record<string, unknown>>(
-        stateTenantId,
-        MDMS_SCHEMAS.TENANT
+      // Search across all state tenants to get the full picture
+      const allTenants = await searchAllStateTenants(
+        env.stateTenantId,
+        MDMS_SCHEMAS.TENANT,
+        filterState
       );
 
       return JSON.stringify(
         {
           success: true,
           environment: env.name,
-          stateTenantId,
-          count: tenants.length,
-          tenants: tenants.map((t) => ({
+          count: allTenants.length,
+          tenants: allTenants.map((t) => ({
             code: t.code,
             name: t.name,
             description: t.description,
@@ -265,12 +333,13 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       const tenantId = args.tenant_id as string;
       const env = digitApi.getEnvironmentInfo();
 
-      const tenants = await digitApi.mdmsV2Search<Record<string, unknown>>(
+      // Search across all state tenants to find this tenant
+      const allTenants = await searchAllStateTenants(
         env.stateTenantId,
-        MDMS_SCHEMAS.TENANT,
+        MDMS_SCHEMAS.TENANT
       );
 
-      const found = tenants.find((t) => t.code === tenantId);
+      const found = allTenants.find((t) => t.code === tenantId);
 
       if (found) {
         return JSON.stringify(
@@ -288,12 +357,6 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           2
         );
       }
-
-      // Not found by unique identifier — try full list
-      const allTenants = await digitApi.mdmsV2Search<Record<string, unknown>>(
-        env.stateTenantId,
-        MDMS_SCHEMAS.TENANT
-      );
 
       const suggestions = allTenants
         .filter((t) => {
