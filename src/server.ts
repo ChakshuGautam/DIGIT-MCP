@@ -6,6 +6,7 @@ import {
 import { ToolRegistry } from './tools/registry.js';
 import { registerAllTools } from './tools/index.js';
 import { ALL_GROUPS } from './types/index.js';
+import { mcpLogger } from './logger.js';
 
 export interface CreateServerOptions {
   enableAllGroups?: boolean;
@@ -85,12 +86,17 @@ export function createServer(options?: CreateServerOptions): Server {
       };
     }
 
+    const start = Date.now();
+    mcpLogger.toolCall(name, (args || {}) as Record<string, unknown>);
+
     try {
       const result = await tool.handler((args || {}) as Record<string, unknown>);
+      mcpLogger.toolResult(name, Date.now() - start, false);
       return {
         content: [{ type: 'text', text: result }],
       };
     } catch (error) {
+      mcpLogger.toolResult(name, Date.now() - start, true);
       return {
         content: [
           {
