@@ -36,9 +36,9 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         },
         tenant_id: {
           type: 'string',
-          description: 'Tenant ID for login (default: state tenant from environment config). ' +
-            'Can be a state-level tenant (e.g. "statea") or city-level (e.g. "statea.f"). ' +
-            'The state tenant context is auto-detected from this value.',
+          description: 'Set the operational state tenant (e.g. "statea", "pg"). ' +
+            'This controls which tenant context is used for MDMS queries, role assignments, and API operations. ' +
+            'Login always uses the user\'s home tenant to preserve the full role set.',
         },
         state_tenant: {
           type: 'string',
@@ -57,12 +57,22 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       const env = digitApi.getEnvironmentInfo();
       const username = (args.username as string) || process.env.CRS_USERNAME;
       const password = (args.password as string) || process.env.CRS_PASSWORD;
-      const tenantId = (args.tenant_id as string) || process.env.CRS_TENANT_ID || env.stateTenantId;
+
+      // Login always uses the user's home tenant (CRS_TENANT_ID or env default)
+      // to ensure the correct user record and full role set is returned.
+      // tenant_id and state_tenant only affect the operational context.
+      const loginTenantId = process.env.CRS_TENANT_ID || env.stateTenantId;
+
+      // Determine the desired operational state tenant:
+      // explicit state_tenant > tenant_id > current default
+      const desiredStateTenant = (args.state_tenant as string)
+        || (args.tenant_id as string)
+        || null;
 
       if (!username || !password) {
-        // Apply explicit state_tenant even without login
-        if (args.state_tenant) {
-          digitApi.setStateTenant(args.state_tenant as string);
+        // Apply state tenant even without login
+        if (desiredStateTenant) {
+          digitApi.setStateTenant(desiredStateTenant);
         }
         const currentEnv = digitApi.getEnvironmentInfo();
         return JSON.stringify(
@@ -78,11 +88,11 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       }
 
       try {
-        await digitApi.login(username, password, tenantId);
+        await digitApi.login(username, password, loginTenantId);
 
-        // Explicit state_tenant override takes precedence over auto-detection from login
-        if (args.state_tenant) {
-          digitApi.setStateTenant(args.state_tenant as string);
+        // Set the operational state tenant (overrides auto-detection from login)
+        if (desiredStateTenant) {
+          digitApi.setStateTenant(desiredStateTenant);
         }
 
         const auth = digitApi.getAuthInfo();
@@ -94,7 +104,7 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
             message: `Authenticated as "${username}" on ${envAfterLogin.name}`,
             environment: { name: envAfterLogin.name, url: envAfterLogin.url },
             stateTenantId: envAfterLogin.stateTenantId,
-            loginTenantId: tenantId,
+            loginTenantId,
             user: auth.user
               ? {
                   userName: auth.user.userName,
