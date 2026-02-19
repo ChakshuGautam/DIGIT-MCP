@@ -73,17 +73,28 @@ export function registerValidatorTools(registry: ToolRegistry): void {
       };
 
       try {
-        const boundaries = await digitApi.boundarySearch(tenantId, hierarchyType);
+        // Use relationship tree search (returns TenantBoundary with parent-child tree)
+        const tenantBoundaries = await digitApi.boundaryRelationshipTreeSearch(tenantId, hierarchyType);
 
-        if (boundaries.length === 0) {
-          result.valid = false;
-          result.errors.push({
-            field: 'boundary',
-            message: `No boundaries found for tenant "${tenantId}" with hierarchy type "${hierarchyType}"`,
-            code: 'BOUNDARY_MISSING',
-          });
+        if (tenantBoundaries.length === 0) {
+          // Fallback: check if flat boundary entities exist (created but no relationships yet)
+          const entities = await digitApi.boundarySearch(tenantId, hierarchyType);
+          if (entities.length > 0) {
+            result.warnings.push({
+              field: 'boundary',
+              message: `Found ${entities.length} boundary entities but no relationship tree. Boundaries may need relationships created.`,
+            });
+            result.summary = `Found ${entities.length} boundary entity/entities but no relationship tree for hierarchy "${hierarchyType}"`;
+          } else {
+            result.valid = false;
+            result.errors.push({
+              field: 'boundary',
+              message: `No boundaries found for tenant "${tenantId}" with hierarchy type "${hierarchyType}"`,
+              code: 'BOUNDARY_MISSING',
+            });
+          }
         } else {
-          // Count boundary nodes
+          // Count boundary nodes in the tree
           let totalNodes = 0;
           const countNodes = (items: unknown[]): void => {
             for (const item of items) {
@@ -95,10 +106,10 @@ export function registerValidatorTools(registry: ToolRegistry): void {
             }
           };
 
-          for (const tb of boundaries) {
-            const boundary = tb.boundary;
-            if (boundary && typeof boundary === 'object') {
-              countNodes([boundary]);
+          for (const tb of tenantBoundaries) {
+            const boundaryList = tb.boundary;
+            if (Array.isArray(boundaryList)) {
+              countNodes(boundaryList);
             }
           }
 
@@ -109,7 +120,7 @@ export function registerValidatorTools(registry: ToolRegistry): void {
             });
           }
 
-          result.summary = `Found ${boundaries.length} boundary tree(s) with ${totalNodes} total node(s) for hierarchy "${hierarchyType}"`;
+          result.summary = `Found ${tenantBoundaries.length} boundary tree(s) with ${totalNodes} total node(s) for hierarchy "${hierarchyType}"`;
         }
       } catch (error) {
         result.valid = false;

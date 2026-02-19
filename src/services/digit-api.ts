@@ -250,13 +250,13 @@ class DigitApiClient {
     return (data.mdms || [])[0] as MdmsRecord;
   }
 
-  // Boundary search
+  // Boundary entity search (flat list)
   async boundarySearch(
     tenantId: string,
     hierarchyType?: string,
     options?: { limit?: number; offset?: number }
   ): Promise<Record<string, unknown>[]> {
-    const data = await this.request<{ TenantBoundary?: Record<string, unknown>[] }>(
+    const data = await this.request<{ Boundary?: Record<string, unknown>[] }>(
       this.endpoint('BOUNDARY_SEARCH'),
       {
         RequestInfo: this.buildRequestInfo(),
@@ -265,6 +265,25 @@ class DigitApiClient {
           hierarchyType,
           limit: options?.limit || 100,
           offset: options?.offset || 0,
+        },
+      }
+    );
+
+    return data.Boundary || [];
+  }
+
+  // Boundary relationship search (tree structure via TenantBoundary)
+  async boundaryRelationshipTreeSearch(
+    tenantId: string,
+    hierarchyType?: string
+  ): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ TenantBoundary?: Record<string, unknown>[] }>(
+      this.endpoint('BOUNDARY_RELATIONSHIP_SEARCH'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        BoundaryRelationship: {
+          tenantId,
+          hierarchyType,
         },
       }
     );
