@@ -11,7 +11,11 @@ export const ENDPOINTS = {
 
   // Boundary
   BOUNDARY_SEARCH: '/boundary-service/boundary/_search',
+  BOUNDARY_CREATE: '/boundary-service/boundary/_create',
   BOUNDARY_HIERARCHY_SEARCH: '/boundary-service/boundary-hierarchy-definition/_search',
+  BOUNDARY_HIERARCHY_CREATE: '/boundary-service/boundary-hierarchy-definition/_create',
+  BOUNDARY_RELATIONSHIP_CREATE: '/boundary-service/boundary-relationships/_create',
+  BOUNDARY_RELATIONSHIP_SEARCH: '/boundary-service/boundary-relationships/_search',
 
   // HRMS
   HRMS_EMPLOYEES_SEARCH: '/egov-hrms/employees/_search',

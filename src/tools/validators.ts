@@ -3,6 +3,36 @@ import { MDMS_SCHEMAS } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
 
+/**
+ * Build an ordered list of boundary types from a hierarchy definition.
+ * Input is an unordered array of { boundaryType, parentBoundaryType }.
+ * Returns types ordered root-first (e.g. ["Country", "State", "District", ...]).
+ */
+function buildOrderedLevels(
+  hierarchy: { boundaryType: string; parentBoundaryType?: string | null }[]
+): string[] {
+  const childMap = new Map<string, string>();
+  let root: string | null = null;
+
+  for (const h of hierarchy) {
+    if (!h.parentBoundaryType) {
+      root = h.boundaryType;
+    } else {
+      childMap.set(h.parentBoundaryType, h.boundaryType);
+    }
+  }
+
+  if (!root) return hierarchy.map((h) => h.boundaryType);
+
+  const ordered: string[] = [];
+  let current: string | undefined = root;
+  while (current) {
+    ordered.push(current);
+    current = childMap.get(current);
+  }
+  return ordered;
+}
+
 export function registerValidatorTools(registry: ToolRegistry): void {
   // ──────────────────────────────────────────
   // boundary group
@@ -563,7 +593,216 @@ export function registerValidatorTools(registry: ToolRegistry): void {
   } satisfies ToolMetadata);
 
   // ──────────────────────────────────────────
-  // boundary group — boundary management tools
+  // boundary group — direct boundary creation
+  // ──────────────────────────────────────────
+
+  // boundary_create — create boundaries from JSON (no Excel needed)
+  registry.register({
+    name: 'boundary_create',
+    group: 'boundary',
+    category: 'boundary-mgmt',
+    risk: 'write',
+    description:
+      'Create boundary hierarchy and entities from JSON. No Excel file needed — calls boundary-service APIs directly. ' +
+      'Three-step process: (1) create hierarchy definition if needed, (2) create boundary entities, (3) create parent-child relationships. ' +
+      'Accepts a flat list of boundaries with their type and parent code. Processes them top-down.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID (e.g. "pg.citya", "statea.f")',
+        },
+        hierarchy_type: {
+          type: 'string',
+          description: 'Hierarchy type (default: "ADMIN")',
+        },
+        hierarchy_definition: {
+          type: 'array',
+          description: 'Optional: define the hierarchy levels top-down. E.g. ["Country", "State", "District", "City", "Ward", "Locality"]. ' +
+            'If omitted, uses the existing hierarchy for this tenant. If the tenant has no hierarchy, this is required.',
+          items: { type: 'string' },
+        },
+        boundaries: {
+          type: 'array',
+          description: 'List of boundaries to create. Each has: code (unique boundary code), type (boundary type matching hierarchy, e.g. "Ward"), parent (parent boundary code, null for root). ' +
+            'Process order: top-down by hierarchy level. Duplicates (already existing) are skipped.',
+          items: {
+            type: 'object',
+            properties: {
+              code: { type: 'string', description: 'Unique boundary code' },
+              type: { type: 'string', description: 'Boundary type (must match a level in the hierarchy)' },
+              parent: { type: 'string', description: 'Parent boundary code (null/omit for root level)' },
+            },
+            required: ['code', 'type'],
+          },
+        },
+      },
+      required: ['tenant_id', 'boundaries'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const hierarchyType = (args.hierarchy_type as string) || 'ADMIN';
+      const hierarchyDef = args.hierarchy_definition as string[] | undefined;
+      const boundaries = args.boundaries as { code: string; type: string; parent?: string }[];
+
+      const results: {
+        hierarchy: { action: string; detail?: unknown; error?: string };
+        entitiesCreated: string[];
+        entitiesSkipped: string[];
+        relationshipsCreated: string[];
+        relationshipsSkipped: string[];
+        errors: { code: string; step: string; error: string }[];
+      } = {
+        hierarchy: { action: 'none' },
+        entitiesCreated: [],
+        entitiesSkipped: [],
+        relationshipsCreated: [],
+        relationshipsSkipped: [],
+        errors: [],
+      };
+
+      // Step 1: Ensure hierarchy definition exists
+      let hierarchyLevels: string[] = [];
+
+      if (hierarchyDef && hierarchyDef.length > 0) {
+        // User provided hierarchy — create it
+        const levels = hierarchyDef.map((type, i) => ({
+          boundaryType: type,
+          parentBoundaryType: i === 0 ? null : hierarchyDef[i - 1],
+          active: true,
+        }));
+
+        try {
+          const created = await digitApi.boundaryHierarchyCreate(tenantId, hierarchyType, levels);
+          results.hierarchy = { action: 'created', detail: created };
+          hierarchyLevels = hierarchyDef;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          // If already exists, that's fine — fetch existing
+          if (msg.includes('DUPLICATE') || msg.includes('already exists') || msg.includes('unique')) {
+            results.hierarchy = { action: 'already_exists' };
+            // Fetch existing to get level order
+            try {
+              const existing = await digitApi.boundaryHierarchySearch(tenantId, hierarchyType);
+              if (existing.length > 0) {
+                const hier = existing[0] as { boundaryHierarchy?: { boundaryType: string; parentBoundaryType?: string }[] };
+                if (hier.boundaryHierarchy) {
+                  hierarchyLevels = buildOrderedLevels(hier.boundaryHierarchy);
+                }
+              }
+            } catch { /* use user-provided order */ }
+            if (hierarchyLevels.length === 0) hierarchyLevels = hierarchyDef;
+          } else {
+            results.hierarchy = { action: 'error', error: msg };
+            return JSON.stringify({ success: false, results, tenantId }, null, 2);
+          }
+        }
+      } else {
+        // No hierarchy provided — fetch existing
+        try {
+          const existing = await digitApi.boundaryHierarchySearch(tenantId, hierarchyType);
+          if (existing.length > 0) {
+            const hier = existing[0] as { boundaryHierarchy?: { boundaryType: string; parentBoundaryType?: string }[] };
+            if (hier.boundaryHierarchy) {
+              hierarchyLevels = buildOrderedLevels(hier.boundaryHierarchy);
+            }
+            results.hierarchy = { action: 'existing', detail: hierarchyLevels };
+          } else {
+            return JSON.stringify({
+              success: false,
+              error: 'No hierarchy definition found for this tenant. Provide hierarchy_definition parameter.',
+              tenantId,
+              hierarchyType,
+            }, null, 2);
+          }
+        } catch (error) {
+          return JSON.stringify({
+            success: false,
+            error: `Failed to fetch hierarchy: ${error instanceof Error ? error.message : String(error)}`,
+            hint: 'Provide hierarchy_definition parameter to create one.',
+          }, null, 2);
+        }
+      }
+
+      // Step 2: Create boundary entities in batch
+      // Split into batches of 50 to avoid payload limits
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < boundaries.length; i += BATCH_SIZE) {
+        const batch = boundaries.slice(i, i + BATCH_SIZE);
+        try {
+          const created = await digitApi.boundaryCreate(
+            tenantId,
+            batch.map((b) => ({ code: b.code, tenantId }))
+          );
+          results.entitiesCreated.push(...created.map((c) => (c.code as string) || 'unknown'));
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          // If some are duplicates, try one by one
+          for (const b of batch) {
+            try {
+              const created = await digitApi.boundaryCreate(tenantId, [{ code: b.code, tenantId }]);
+              results.entitiesCreated.push(...created.map((c) => (c.code as string) || b.code));
+            } catch (innerError) {
+              const innerMsg = innerError instanceof Error ? innerError.message : String(innerError);
+              if (innerMsg.includes('DUPLICATE') || innerMsg.includes('already exists') || innerMsg.includes('unique')) {
+                results.entitiesSkipped.push(b.code);
+              } else {
+                results.errors.push({ code: b.code, step: 'entity_create', error: innerMsg });
+              }
+            }
+          }
+        }
+      }
+
+      // Step 3: Create relationships top-down (ordered by hierarchy level)
+      const levelOrder = new Map(hierarchyLevels.map((l, i) => [l, i]));
+      const sorted = [...boundaries].sort((a, b) => {
+        const aOrder = levelOrder.get(a.type) ?? 999;
+        const bOrder = levelOrder.get(b.type) ?? 999;
+        return aOrder - bOrder;
+      });
+
+      for (const b of sorted) {
+        try {
+          await digitApi.boundaryRelationshipCreate(
+            tenantId,
+            b.code,
+            hierarchyType,
+            b.type,
+            b.parent || null
+          );
+          results.relationshipsCreated.push(b.code);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          if (msg.includes('DUPLICATE') || msg.includes('already exists') || msg.includes('unique')) {
+            results.relationshipsSkipped.push(b.code);
+          } else {
+            results.errors.push({ code: b.code, step: 'relationship_create', error: msg });
+          }
+        }
+      }
+
+      return JSON.stringify({
+        success: results.errors.length === 0,
+        tenantId,
+        hierarchyType,
+        summary: {
+          entitiesCreated: results.entitiesCreated.length,
+          entitiesSkipped: results.entitiesSkipped.length,
+          relationshipsCreated: results.relationshipsCreated.length,
+          relationshipsSkipped: results.relationshipsSkipped.length,
+          errors: results.errors.length,
+        },
+        results,
+      }, null, 2);
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // boundary group — boundary management tools (Excel-based, legacy)
   // ──────────────────────────────────────────
 
   registry.register({

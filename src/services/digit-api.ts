@@ -677,6 +677,102 @@ class DigitApiClient {
     return Array.isArray(data) ? data : [];
   }
 
+  // Boundary — create boundary entities (batch)
+  async boundaryCreate(
+    tenantId: string,
+    boundaries: { code: string; tenantId?: string; geometry?: Record<string, unknown> }[]
+  ): Promise<Record<string, unknown>[]> {
+    const defaultGeometry = { type: 'Point', coordinates: [0, 0] };
+    const data = await this.request<{ Boundary?: Record<string, unknown>[] }>(
+      this.endpoint('BOUNDARY_CREATE'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        Boundary: boundaries.map((b) => ({
+          tenantId: b.tenantId || tenantId,
+          code: b.code,
+          geometry: b.geometry || defaultGeometry,
+        })),
+      }
+    );
+
+    return data.Boundary || [];
+  }
+
+  // Boundary — create hierarchy definition
+  async boundaryHierarchyCreate(
+    tenantId: string,
+    hierarchyType: string,
+    boundaryHierarchy: { boundaryType: string; parentBoundaryType: string | null; active?: boolean }[]
+  ): Promise<Record<string, unknown>> {
+    const data = await this.request<{ BoundaryHierarchy?: Record<string, unknown> }>(
+      this.endpoint('BOUNDARY_HIERARCHY_CREATE'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        BoundaryHierarchy: {
+          tenantId,
+          hierarchyType,
+          boundaryHierarchy: boundaryHierarchy.map((h) => ({
+            boundaryType: h.boundaryType,
+            parentBoundaryType: h.parentBoundaryType,
+            active: h.active !== false,
+          })),
+        },
+      }
+    );
+
+    return data.BoundaryHierarchy || {};
+  }
+
+  // Boundary — create a single boundary relationship (parent-child link)
+  async boundaryRelationshipCreate(
+    tenantId: string,
+    code: string,
+    hierarchyType: string,
+    boundaryType: string,
+    parent: string | null
+  ): Promise<Record<string, unknown>> {
+    const data = await this.request<{ BoundaryRelationship?: Record<string, unknown> }>(
+      this.endpoint('BOUNDARY_RELATIONSHIP_CREATE'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        BoundaryRelationship: {
+          tenantId,
+          code,
+          hierarchyType,
+          boundaryType,
+          parent: parent || undefined,
+        },
+      }
+    );
+
+    return data.BoundaryRelationship || {};
+  }
+
+  // Boundary — search boundary relationships
+  async boundaryRelationshipSearch(
+    tenantId: string,
+    hierarchyType: string,
+    boundaryType?: string,
+    parent?: string,
+    codes?: string[]
+  ): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ TenantBoundary?: Record<string, unknown>[] }>(
+      this.endpoint('BOUNDARY_RELATIONSHIP_SEARCH'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        BoundaryRelationship: {
+          tenantId,
+          hierarchyType,
+          boundaryType,
+          parent,
+          code: codes,
+        },
+      }
+    );
+
+    return data.TenantBoundary || [];
+  }
+
   // Boundary Management — process (upload/update boundary data)
   async boundaryMgmtProcess(
     tenantId: string,
