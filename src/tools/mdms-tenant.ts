@@ -448,6 +448,145 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
     },
   } satisfies ToolMetadata);
 
+  // mdms_schema_search — search schema definitions
+  registry.register({
+    name: 'mdms_schema_search',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'read',
+    description:
+      'Search MDMS v2 schema definitions for a tenant. Shows what schemas are registered and available for creating data records. ' +
+      'If mdms_create fails with "Schema definition not found", use this to check which tenant root has the schema.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID (typically the state-level root, e.g. "pg", "statea", "tenant")',
+        },
+        codes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional: filter by specific schema codes (e.g. ["RAINMAKER-PGR.ServiceDefs"])',
+        },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const codes = args.codes as string[] | undefined;
+      const schemas = await digitApi.mdmsSchemaSearch(tenantId, codes);
+
+      return JSON.stringify(
+        {
+          success: true,
+          tenantId,
+          count: schemas.length,
+          schemas: schemas.map((s) => ({
+            code: s.code,
+            description: s.description,
+            tenantId: s.tenantId,
+            isActive: s.isActive,
+          })),
+        },
+        null,
+        2
+      );
+    },
+  } satisfies ToolMetadata);
+
+  // mdms_schema_create — register a schema definition
+  registry.register({
+    name: 'mdms_schema_create',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'write',
+    description:
+      'Register a new MDMS v2 schema definition for a tenant. Schemas must exist at the state-level root tenant before data records can be created. ' +
+      'Use mdms_schema_search on an existing tenant (e.g. "pg") to find the schema definition to copy, then register it on the new tenant root. ' +
+      'You can also provide a custom JSON Schema definition.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID to register the schema under (state-level root, e.g. "tenant", "statea")',
+        },
+        code: {
+          type: 'string',
+          description: 'Schema code (e.g. "RAINMAKER-PGR.ServiceDefs", "common-masters.Department")',
+        },
+        description: {
+          type: 'string',
+          description: 'Human-readable description of the schema',
+        },
+        definition: {
+          type: 'object',
+          description: 'JSON Schema definition object. Must include "type", "properties", and optionally "required", "x-unique".',
+        },
+        copy_from_tenant: {
+          type: 'string',
+          description: 'Optional: copy the schema definition from another tenant (e.g. "pg"). If provided, "definition" is ignored.',
+        },
+      },
+      required: ['tenant_id', 'code'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const code = args.code as string;
+      const description = (args.description as string) || code;
+      const copyFrom = args.copy_from_tenant as string | undefined;
+      let definition = args.definition as Record<string, unknown> | undefined;
+
+      // Copy schema from another tenant if requested
+      if (copyFrom) {
+        const schemas = await digitApi.mdmsSchemaSearch(copyFrom, [code]);
+        if (schemas.length === 0) {
+          return JSON.stringify({
+            success: false,
+            error: `Schema "${code}" not found in tenant "${copyFrom}". Use mdms_schema_search to list available schemas.`,
+          }, null, 2);
+        }
+        definition = schemas[0].definition as Record<string, unknown>;
+      }
+
+      if (!definition) {
+        return JSON.stringify({
+          success: false,
+          error: 'Either "definition" or "copy_from_tenant" must be provided.',
+        }, null, 2);
+      }
+
+      try {
+        const result = await digitApi.mdmsSchemaCreate(tenantId, code, description, definition);
+        return JSON.stringify({
+          success: true,
+          message: `Schema "${code}" registered for tenant "${tenantId}"`,
+          schema: {
+            id: result.id,
+            tenantId: result.tenantId,
+            code: result.code,
+            isActive: result.isActive,
+          },
+        }, null, 2);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.includes('DUPLICATE') || msg.includes('already exists') || msg.includes('unique')) {
+          return JSON.stringify({
+            success: true,
+            message: `Schema "${code}" already exists for tenant "${tenantId}"`,
+            alreadyExists: true,
+          }, null, 2);
+        }
+        throw error;
+      }
+    },
+  } satisfies ToolMetadata);
+
   // mdms_create — create MDMS record
   registry.register({
     name: 'mdms_create',

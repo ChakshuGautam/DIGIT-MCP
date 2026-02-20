@@ -250,6 +250,52 @@ class DigitApiClient {
     return (data.mdms || [])[0] as MdmsRecord;
   }
 
+  // MDMS v2 Schema Create
+  async mdmsSchemaCreate(
+    tenantId: string,
+    code: string,
+    description: string,
+    definition: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    const data = await this.request<{ SchemaDefinition?: Record<string, unknown> }>(
+      this.endpoint('MDMS_SCHEMA_CREATE'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        SchemaDefinition: {
+          tenantId,
+          code,
+          description,
+          definition,
+          isActive: true,
+        },
+      }
+    );
+
+    return data.SchemaDefinition || {};
+  }
+
+  // MDMS v2 Schema Search
+  async mdmsSchemaSearch(
+    tenantId: string,
+    codes?: string[],
+    options?: { limit?: number; offset?: number }
+  ): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ SchemaDefinitions?: Record<string, unknown>[] }>(
+      this.endpoint('MDMS_SCHEMA_SEARCH'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        SchemaDefCriteria: {
+          tenantId,
+          codes,
+          limit: options?.limit || 200,
+          offset: options?.offset || 0,
+        },
+      }
+    );
+
+    return data.SchemaDefinitions || [];
+  }
+
   // Boundary entity search (flat list)
   async boundarySearch(
     tenantId: string,

@@ -8,6 +8,8 @@ export const ENDPOINTS = {
   // MDMS v2
   MDMS_SEARCH: '/egov-mdms-service/v2/_search',
   MDMS_CREATE: '/egov-mdms-service/v2/_create',
+  MDMS_SCHEMA_CREATE: '/mdms-v2/schema/v1/_create',
+  MDMS_SCHEMA_SEARCH: '/mdms-v2/schema/v1/_search',
 
   // Boundary
   BOUNDARY_SEARCH: '/boundary-service/boundary/_search',
