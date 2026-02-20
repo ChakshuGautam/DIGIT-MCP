@@ -190,8 +190,7 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
             hint: `Login failed against tenant ${triedTenants}. ` +
               `IMPORTANT: HRMS employee usernames are the EMPLOYEE CODE (e.g. "EMP-LIVE-000057"), NOT the mobile number. ` +
               `Check the employee_create response for the "code" field and use that as the username. ` +
-              `Default password is "eGov@123". ` +
-              `Also note: you do NOT need to re-authenticate to create PGR complaints — the ADMIN user with EMPLOYEE role can call pgr_create directly.`,
+              `Default password is "eGov@123".`,
           },
           null,
           2

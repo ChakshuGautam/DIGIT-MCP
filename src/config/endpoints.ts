@@ -4,6 +4,7 @@ export const ENDPOINTS = {
   AUTH: '/user/oauth/token',
   USER_SEARCH: '/user/_search',
   USER_CREATE: '/user/users/_createnovalidate',
+  USER_UPDATE: '/user/users/_updatenovalidate',
 
   // MDMS v2
   MDMS_SEARCH: '/egov-mdms-service/v2/_search',

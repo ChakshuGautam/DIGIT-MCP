@@ -186,6 +186,21 @@ class DigitApiClient {
     return (data.user || [])[0] || {};
   }
 
+  // User update (admin, no validation)
+  async userUpdate(
+    user: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    const data = await this.request<{ user?: Record<string, unknown>[] }>(
+      this.endpoint('USER_UPDATE'),
+      {
+        RequestInfo: this.buildRequestInfo(),
+        user,
+      }
+    );
+
+    return (data.user || [])[0] || {};
+  }
+
   // MDMS v2 Search — returns typed array
   async mdmsV2Search<T = Record<string, unknown>>(
     tenantId: string,

@@ -75,9 +75,10 @@ export function registerUserTools(registry: ToolRegistry): void {
             type: u.type,
             active: u.active,
             tenantId: u.tenantId,
-            roles: ((u.roles || []) as Array<{ code: string; name?: string }>).map((r) => ({
+            roles: ((u.roles || []) as Array<{ code: string; name?: string; tenantId?: string }>).map((r) => ({
               code: r.code,
               name: r.name,
+              tenantId: r.tenantId,
             })),
           })),
           truncated: users.length > 50,
@@ -216,6 +217,106 @@ export function registerUserTools(registry: ToolRegistry): void {
             { tool: 'user_search', purpose: 'Search existing users by mobile/name' },
             { tool: 'access_roles_search', purpose: 'List valid role codes' },
           ],
+        }, null, 2);
+      }
+    },
+  } satisfies ToolMetadata);
+
+  registry.register({
+    name: 'user_role_add',
+    group: 'admin',
+    category: 'user',
+    risk: 'write',
+    description:
+      'Add roles to an existing user for a specific tenant. CRITICAL for cross-tenant operations: ' +
+      'DIGIT checks that user roles are tagged to the target tenant root. If a user authenticated on "pg" ' +
+      'tries to create PGR complaints on "tenant.coimbatore", they need roles tagged to "tenant". ' +
+      'This tool fetches the user, adds the missing roles for the target tenant, and updates the user record. ' +
+      'Use this when pgr_create or pgr_update fails with "User is not authorized" due to cross-tenant role mismatch.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Target tenant ID (will be resolved to root, e.g. "tenant.live" → "tenant")',
+        },
+        username: {
+          type: 'string',
+          description: 'Username of the user to update (default: current logged-in user)',
+        },
+        role_codes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Role codes to add (default: ["CITIZEN","EMPLOYEE","CSR","GRO","PGR_LME","DGRO","SUPERUSER"] — standard PGR roles)',
+        },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const targetTenant = args.tenant_id as string;
+      const rootTenant = targetTenant.includes('.') ? targetTenant.split('.')[0] : targetTenant;
+
+      // Determine which user to update
+      const authInfo = digitApi.getAuthInfo();
+      const username = (args.username as string) || authInfo.user?.userName;
+      if (!username) {
+        return JSON.stringify({ success: false, error: 'No username specified and no user is logged in.' });
+      }
+
+      // Roles to add
+      const defaultRoles = ['CITIZEN', 'EMPLOYEE', 'CSR', 'GRO', 'PGR_LME', 'DGRO', 'SUPERUSER'];
+      const roleCodes = (args.role_codes as string[]) || defaultRoles;
+
+      try {
+        // Search for the user to get their full record
+        const searchTenant = authInfo.user?.tenantId || digitApi.getEnvironmentInfo().stateTenantId;
+        const users = await digitApi.userSearch(searchTenant, { userName: username, limit: 1 });
+        if (users.length === 0) {
+          return JSON.stringify({ success: false, error: `User "${username}" not found on tenant "${searchTenant}".` });
+        }
+
+        const user = users[0];
+        const existingRoles = (user.roles || []) as Array<{ code: string; name: string; tenantId: string }>;
+
+        // Find which roles are missing for the target root tenant
+        const existingForTarget = new Set(
+          existingRoles.filter((r) => r.tenantId === rootTenant).map((r) => r.code)
+        );
+        const newRoles = roleCodes
+          .filter((code) => !existingForTarget.has(code))
+          .map((code) => ({ code, name: code, tenantId: rootTenant }));
+
+        if (newRoles.length === 0) {
+          return JSON.stringify({
+            success: true,
+            message: `User "${username}" already has all requested roles on "${rootTenant}".`,
+            existingRoles: existingRoles.filter((r) => r.tenantId === rootTenant).map((r) => r.code),
+          }, null, 2);
+        }
+
+        // Update user with combined roles
+        const updatedUser = await digitApi.userUpdate({
+          ...user,
+          roles: [...existingRoles, ...newRoles],
+        });
+
+        const addedCodes = newRoles.map((r) => r.code);
+        return JSON.stringify({
+          success: true,
+          message: `Added ${addedCodes.length} roles for "${rootTenant}" to user "${username}": ${addedCodes.join(', ')}`,
+          user: username,
+          targetTenant: rootTenant,
+          rolesAdded: addedCodes,
+          hint: 'Roles added. You may need to call configure again to refresh the auth token with the new roles.',
+        }, null, 2);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return JSON.stringify({
+          success: false,
+          error: msg,
+          hint: 'Failed to update user roles. Verify the user exists and the tenant is valid.',
         }, null, 2);
       }
     },

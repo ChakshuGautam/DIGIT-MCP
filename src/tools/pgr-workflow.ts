@@ -187,31 +187,56 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         const isAuthError = msg.includes('role') || msg.includes('authorized') || msg.includes('permission') || msg.includes('CITIZEN') || msg.includes('CSR');
         const isWorkflowError = msg.includes('BusinessService') || msg.includes('business service') || msg.includes('workflow') || msg.includes('INVALID_BUSINESSSERVICE');
 
+        const targetRoot = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
+        const authInfo = digitApi.getAuthInfo();
+        const userTenantRoot = authInfo.user?.tenantId || '';
+
         let hint: string;
+        const alternatives: { tool: string; purpose: string }[] = [];
         if (isWorkflowError) {
           hint = `PGR workflow is not registered for tenant "${tenantId}". ` +
             `FIX: Call workflow_create with tenant_id="${tenantId}" and copy_from_tenant="pg.citya" to register the PGR state machine. Then retry pgr_create.`;
+          alternatives.push({ tool: 'workflow_create', purpose: `Register PGR workflow for ${tenantId}` });
         } else if (isAuthError) {
-          hint = 'The logged-in user may lack the required role. PGR complaint creation requires CITIZEN or CSR role for the APPLY action. ' +
-            'Ensure the admin user has CSR role, or use credentials of a user with CITIZEN/CSR role.';
+          const isCrossTenant = userTenantRoot !== targetRoot;
+          if (isCrossTenant) {
+            hint = `CROSS-TENANT ROLE MISMATCH: Your user "${authInfo.user?.userName}" is authenticated on "${userTenantRoot}" ` +
+              `but the complaint targets "${tenantId}" (root: "${targetRoot}"). ` +
+              `DIGIT's OAuth token only includes roles for the user's home tenant hierarchy. ` +
+              `FIX: Create an employee on the target tenant using employee_create (with PGR roles like GRO, PGR_LME, DGRO), ` +
+              `then call configure with the employee's code (returned in loginCredentials) as username, ` +
+              `password "eGov@123", and tenant_id="${targetRoot}". Then retry pgr_create.`;
+            alternatives.push(
+              { tool: 'employee_create', purpose: `Create employee on ${tenantId} with PGR roles (GRO, PGR_LME, DGRO)` },
+              { tool: 'configure', purpose: `Re-authenticate as the new employee with tenant_id="${targetRoot}"` },
+            );
+          } else {
+            hint = 'The logged-in user may lack the required role. PGR complaint creation requires CITIZEN, CSR, or EMPLOYEE role for the APPLY action. ' +
+              'Call user_role_add to add missing roles for this tenant, then re-authenticate with configure.';
+            alternatives.push(
+              { tool: 'user_role_add', purpose: 'Add missing PGR roles for this tenant' },
+              { tool: 'configure', purpose: 'Re-authenticate to pick up new roles' },
+            );
+          }
         } else {
           hint = `Complaint creation failed. Check these in order: ` +
             `(1) Call workflow_business_services with tenant_id="${tenantId}" — if 0 results, call workflow_create with copy_from_tenant="pg.citya" first. ` +
             `(2) Verify service_code is valid (use validate_complaint_types). ` +
             `(3) Verify locality code exists (use validate_boundary). ` +
             `(4) Ensure tenant_id is city-level (e.g. "pg.citya", not "pg").`;
+          alternatives.push(
+            { tool: 'workflow_create', purpose: 'Register PGR workflow for this tenant' },
+            { tool: 'workflow_business_services', purpose: 'Check if PGR workflow exists' },
+            { tool: 'validate_complaint_types', purpose: 'List valid service codes' },
+            { tool: 'validate_boundary', purpose: 'Find valid locality boundary codes' },
+          );
         }
 
         return JSON.stringify({
           success: false,
           error: msg,
           hint,
-          alternatives: [
-            { tool: 'workflow_create', purpose: 'Register PGR workflow for this tenant (copy from pg.citya)' },
-            { tool: 'workflow_business_services', purpose: 'Check if PGR workflow exists for this tenant' },
-            { tool: 'validate_complaint_types', purpose: 'List valid service codes for the tenant' },
-            { tool: 'validate_boundary', purpose: 'Find valid locality boundary codes' },
-          ],
+          alternatives,
         }, null, 2);
       }
     },
