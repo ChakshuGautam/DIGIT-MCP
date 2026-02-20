@@ -174,11 +174,15 @@ export function registerHrmsTools(registry: ToolRegistry): void {
         if (isDuplicate) {
           hint = 'An employee with this mobile number may already exist for this tenant. Use validate_employees to search existing employees.';
         } else if (isIdgenError) {
-          hint = `Employee ID generation failed for tenant "${tenantId}". This usually means the tenant code does not follow the "{state}.{city}" naming convention ` +
-            `(e.g. "pg.citya" where "pg" is a valid state tenant). The idgen service derives the state from the tenant code prefix and looks up city code from MDMS. ` +
-            `Verify: (1) the tenant code prefix matches an existing state-level tenant in MDMS (use mdms_get_tenants), ` +
-            `(2) the tenant record has a valid city.code field. ` +
-            `If the tenant naming cannot be changed, use a custom idgen format without [city] placeholder via idgen_generate, then create the employee with a pre-generated code.`;
+          const stateRoot = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
+          hint = `Employee ID generation failed for tenant "${tenantId}". The idgen service uses [CITY.CODE] from MDMS to generate employee codes. ` +
+            `To fix this, run these steps in order:\n` +
+            `1. Register the IdFormat schema for the "${stateRoot}" root: call mdms_schema_create with tenant_id="${stateRoot}", code="common-masters.IdFormat", copy_from_tenant="pg"\n` +
+            `2. Create the HRMS employee ID format: call mdms_create with tenant_id="${stateRoot}", schema_code="common-masters.IdFormat", ` +
+            `unique_identifier="egov.employee.code", data={"format":"[CITY.CODE]-[SEQ_EGOV_COMMON_[TENANT_ID]]","idname":"egov.employee.code"}\n` +
+            `3. Also ensure these schemas exist for "${stateRoot}" (copy from "pg" via mdms_schema_create): ` +
+            `common-masters.Department, common-masters.Designation, egov-hrms.EmployeeStatus, egov-hrms.EmployeeType, egov-hrms.DeactivationReason\n` +
+            `4. Retry the employee_create call after registering the schemas and ID format.`;
         } else if (isUserError) {
           hint = 'The underlying user creation failed. The mobile number may already be registered, or the user service rejected the request. ' +
             'Use user_search to check if a user with this mobile number already exists.';
