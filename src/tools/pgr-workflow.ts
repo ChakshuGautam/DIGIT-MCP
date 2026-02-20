@@ -148,13 +148,52 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
       const citizenName = args.citizen_name as string;
       const citizenMobile = args.citizen_mobile as string;
       const env = digitApi.getEnvironmentInfo();
+      const rootTenant = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
+
+      // Pre-create the citizen user via _createnovalidate so they get password-based auth.
+      // PGR auto-creates citizens with OTP-only auth — those users can't login with a password.
+      // By creating the user first, PGR finds the existing user instead of creating a new one.
+      let citizenCredentials: { username: string; password: string; loginTenantId: string } | null = null;
+      let citizenUser: Record<string, unknown> | null = null;
+      try {
+        // Check if citizen already exists
+        const existing = await digitApi.userSearch(rootTenant, { mobileNumber: citizenMobile, limit: 1 });
+        if (existing.length > 0) {
+          citizenUser = existing[0];
+          // Reset password in case it was created by PGR previously (OTP-only)
+          try { await digitApi.userUpdate({ ...citizenUser, password: 'eGov@123' }); } catch { /* non-fatal */ }
+        } else {
+          // Create new citizen with password auth.
+          // IMPORTANT: Use type EMPLOYEE (not CITIZEN) because DIGIT's OAuth only supports
+          // password auth for EMPLOYEE-type users. CITIZEN-type uses OTP only.
+          // The CITIZEN *role* is what PGR checks for RATE/REOPEN permissions.
+          citizenUser = await digitApi.userCreate({
+            name: citizenName,
+            mobileNumber: citizenMobile,
+            userName: citizenMobile,
+            password: 'eGov@123',
+            type: 'EMPLOYEE',
+            active: true,
+            roles: [{ code: 'CITIZEN', name: 'Citizen', tenantId: rootTenant }],
+            tenantId: rootTenant,
+          }, rootTenant);
+        }
+        citizenCredentials = {
+          username: citizenMobile,
+          password: 'eGov@123',
+          loginTenantId: rootTenant,
+        };
+      } catch {
+        // Non-fatal: PGR will auto-create the citizen (but without password auth)
+      }
 
       const citizen = {
         mobileNumber: citizenMobile,
         name: citizenName,
         type: 'CITIZEN',
-        roles: [{ code: 'CITIZEN', name: 'Citizen', tenantId: env.stateTenantId }],
-        tenantId: env.stateTenantId,
+        roles: [{ code: 'CITIZEN', name: 'Citizen', tenantId: rootTenant }],
+        tenantId: rootTenant,
+        ...(citizenUser?.uuid ? { uuid: citizenUser.uuid } : {}),
       };
 
       try {
@@ -178,6 +217,12 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
               status: svc.applicationStatus,
               tenantId: svc.tenantId,
             },
+            citizenLogin: citizenCredentials
+              ? {
+                  ...citizenCredentials,
+                  note: 'Use these credentials with configure to authenticate as the citizen for RATE or REOPEN actions.',
+                }
+              : undefined,
           },
           null,
           2
@@ -355,10 +400,27 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         const isStateError = msg.includes('state') || msg.includes('transition') || msg.includes('action');
         const isWorkflowMissing = msg.includes('BusinessService') || msg.includes('business service') || msg.includes('INVALID_BUSINESSSERVICE');
 
+        const targetRoot = (args.tenant_id as string).includes('.') ? (args.tenant_id as string).split('.')[0] : args.tenant_id as string;
+        const authInfo = digitApi.getAuthInfo();
+        const userTenantRoot = authInfo.user?.tenantId || '';
+        const isCrossTenant = userTenantRoot !== targetRoot;
+        const isCitizenAction = action === 'RATE' || action === 'REOPEN';
+
         let hint: string;
         if (isWorkflowMissing) {
           hint = `PGR workflow is not registered for tenant "${args.tenant_id}". ` +
             `FIX: Call workflow_create with tenant_id="${args.tenant_id}" and copy_from_tenant="pg.citya" to register the PGR state machine. Then retry.`;
+        } else if (isRoleError && isCitizenAction) {
+          hint = `${action} requires CITIZEN role tagged to "${targetRoot}". ` +
+            (isCrossTenant
+              ? `Your user "${authInfo.user?.userName}" is on "${userTenantRoot}" — CITIZEN role doesn't cover "${targetRoot}". `
+              : '') +
+            `FIX: The citizen who filed the complaint has login credentials (returned by pgr_create in the citizenLogin field). ` +
+            `Call configure with the citizen's username (their mobile number) and password "eGov@123" and tenant_id="${targetRoot}". ` +
+            `Then retry pgr_update with action="${action}".`;
+        } else if (isRoleError && isCrossTenant) {
+          hint = `CROSS-TENANT ROLE MISMATCH: User "${authInfo.user?.userName}" is on "${userTenantRoot}" but complaint is on "${targetRoot}". ` +
+            `FIX: Call configure with an employee who has roles on "${targetRoot}" (use employee_create if needed). Then retry.`;
         } else if (isRoleError) {
           hint = `The authenticated user may lack the required role for action "${action}". ` +
             'PGR workflow roles: GRO can ASSIGN/REASSIGN/REJECT, PGR_LME can RESOLVE, CITIZEN can REOPEN/RATE. ' +
