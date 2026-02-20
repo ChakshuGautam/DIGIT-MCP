@@ -182,18 +182,32 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         const isAuthError = msg.includes('role') || msg.includes('authorized') || msg.includes('permission') || msg.includes('CITIZEN') || msg.includes('CSR');
+        const isWorkflowError = msg.includes('BusinessService') || msg.includes('business service') || msg.includes('workflow') || msg.includes('INVALID_BUSINESSSERVICE');
+
+        let hint: string;
+        if (isWorkflowError) {
+          hint = `PGR workflow is not registered for tenant "${tenantId}". ` +
+            `FIX: Call workflow_create with tenant_id="${tenantId}" and copy_from_tenant="pg.citya" to register the PGR state machine. Then retry pgr_create.`;
+        } else if (isAuthError) {
+          hint = 'The logged-in user may lack the required role. PGR complaint creation requires CITIZEN or CSR role for the APPLY action. ' +
+            'Ensure the admin user has CSR role, or use credentials of a user with CITIZEN/CSR role.';
+        } else {
+          hint = `Complaint creation failed. Check these in order: ` +
+            `(1) Call workflow_business_services with tenant_id="${tenantId}" — if 0 results, call workflow_create with copy_from_tenant="pg.citya" first. ` +
+            `(2) Verify service_code is valid (use validate_complaint_types). ` +
+            `(3) Verify locality code exists (use validate_boundary). ` +
+            `(4) Ensure tenant_id is city-level (e.g. "pg.citya", not "pg").`;
+        }
+
         return JSON.stringify({
           success: false,
           error: msg,
-          hint: isAuthError
-            ? 'The logged-in user may lack the required role. PGR complaint creation requires the authenticated user to have CITIZEN or CSR role for the APPLY workflow action. ' +
-              'Ensure the admin user has CSR role, or use credentials of a user with CITIZEN/CSR role.'
-            : 'Complaint creation failed. Verify: (1) service_code is valid (use validate_complaint_types), ' +
-              '(2) locality code exists (use validate_boundary), (3) tenant_id is a city-level tenant (e.g. pg.citya, not pg).',
+          hint,
           alternatives: [
+            { tool: 'workflow_create', purpose: 'Register PGR workflow for this tenant (copy from pg.citya)' },
+            { tool: 'workflow_business_services', purpose: 'Check if PGR workflow exists for this tenant' },
             { tool: 'validate_complaint_types', purpose: 'List valid service codes for the tenant' },
             { tool: 'validate_boundary', purpose: 'Find valid locality boundary codes' },
-            { tool: 'workflow_business_services', purpose: 'Check PGR workflow roles and actions' },
           ],
         }, null, 2);
       }
@@ -311,9 +325,13 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         const msg = error instanceof Error ? error.message : String(error);
         const isRoleError = msg.includes('role') || msg.includes('authorized') || msg.includes('permission');
         const isStateError = msg.includes('state') || msg.includes('transition') || msg.includes('action');
+        const isWorkflowMissing = msg.includes('BusinessService') || msg.includes('business service') || msg.includes('INVALID_BUSINESSSERVICE');
 
         let hint: string;
-        if (isRoleError) {
+        if (isWorkflowMissing) {
+          hint = `PGR workflow is not registered for tenant "${args.tenant_id}". ` +
+            `FIX: Call workflow_create with tenant_id="${args.tenant_id}" and copy_from_tenant="pg.citya" to register the PGR state machine. Then retry.`;
+        } else if (isRoleError) {
           hint = `The authenticated user may lack the required role for action "${action}". ` +
             'PGR workflow roles: GRO can ASSIGN/REASSIGN/REJECT, PGR_LME can RESOLVE, CITIZEN can REOPEN/RATE. ' +
             'Use workflow_business_services to check role requirements.';
@@ -331,6 +349,7 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
           attemptedAction: action,
           hint,
           alternatives: [
+            { tool: 'workflow_create', purpose: 'Register PGR workflow if missing' },
             { tool: 'pgr_search', purpose: 'Verify complaint current status' },
             { tool: 'workflow_business_services', purpose: 'Check valid workflow transitions and role requirements' },
             { tool: 'validate_employees', purpose: 'Find employees with correct PGR roles' },
@@ -374,10 +393,40 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         args.business_services as string[] | undefined
       );
 
+      const tenantId = args.tenant_id as string;
+      const requestedCodes = args.business_services as string[] | undefined;
+
+      if (services.length === 0) {
+        // The workflow API returns empty when no filter is specified — suggest filtering by PGR
+        const noFilterUsed = !requestedCodes?.length;
+        let hint: string;
+        if (noFilterUsed) {
+          hint = `The workflow API requires explicit business service codes — it returns empty without a filter. ` +
+            `Retry with business_services=["PGR"] to check if PGR is registered. ` +
+            `If PGR is not found, call workflow_create with tenant_id="${tenantId}" and copy_from_tenant set to a tenant that has PGR (e.g. the state root like "pg").`;
+        } else {
+          hint = `No workflow business services found for "${tenantId}" matching ${JSON.stringify(requestedCodes)}. ` +
+            `FIX: Call workflow_create with tenant_id="${tenantId}" and copy_from_tenant set to a tenant that has the PGR workflow (e.g. "pg"). ` +
+            `This registers the PGR state machine (states, actions, SLA, roles) so complaints can be created and processed.`;
+        }
+
+        return JSON.stringify(
+          {
+            success: true,
+            tenantId,
+            count: 0,
+            businessServices: [],
+            hint,
+          },
+          null,
+          2
+        );
+      }
+
       return JSON.stringify(
         {
           success: true,
-          tenantId: args.tenant_id,
+          tenantId,
           count: services.length,
           businessServices: services.map((bs) => ({
             businessService: bs.businessService,
@@ -457,6 +506,228 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         null,
         2
       );
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // Workflow create tool
+  // ──────────────────────────────────────────
+
+  registry.register({
+    name: 'workflow_create',
+    group: 'pgr',
+    category: 'workflow',
+    risk: 'write',
+    description:
+      'Create a workflow business service definition for a tenant. This registers the state machine (states, actions, transitions, roles, SLA) ' +
+      'that drives services like PGR. REQUIRED before pgr_create will work on a new tenant. ' +
+      'Use copy_from_tenant to clone an existing workflow definition (e.g. from "pg") rather than building from scratch. ' +
+      'The workflow service stores definitions at the STATE ROOT level (e.g. "pg", "tenant") — city-level tenants inherit automatically. ' +
+      'If you pass a city-level tenant (e.g. "tenant.stage3"), it is auto-resolved to the root ("tenant").',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID (e.g. "tenant.stage3" or "tenant"). Auto-resolved to state root for storage.',
+        },
+        copy_from_tenant: {
+          type: 'string',
+          description: 'Copy workflow definitions from this tenant (e.g. "pg"). Copies ALL known business services found. ' +
+            'This is the recommended approach — avoids manually specifying states/actions/roles.',
+        },
+        business_service: {
+          type: 'string',
+          description: 'Business service code (e.g. "PGR"). Only needed if not using copy_from_tenant.',
+        },
+        business: {
+          type: 'string',
+          description: 'Business module name (e.g. "pgr-services"). Only needed if not using copy_from_tenant.',
+        },
+        business_service_sla: {
+          type: 'number',
+          description: 'SLA in milliseconds (e.g. 259200000 for 3 days). Only needed if not using copy_from_tenant.',
+        },
+        states: {
+          type: 'array',
+          description: 'State machine definition — array of state objects. Each state has: state, applicationStatus, isStartState, isTerminateState, actions[]. ' +
+            'Only needed if not using copy_from_tenant.',
+          items: {
+            type: 'object',
+            properties: {
+              state: { type: 'string' },
+              applicationStatus: { type: 'string' },
+              isStartState: { type: 'boolean' },
+              isTerminateState: { type: 'boolean' },
+              actions: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    action: { type: 'string' },
+                    nextState: { type: 'string' },
+                    roles: { type: 'array', items: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const inputTenantId = args.tenant_id as string;
+      const copyFrom = args.copy_from_tenant as string | undefined;
+
+      // Workflow business services must be stored at the state ROOT level.
+      // City-level tenants inherit from the root via tenant hierarchy fallback.
+      const stateRoot = inputTenantId.includes('.') ? inputTenantId.split('.')[0] : inputTenantId;
+      const sourceRoot = copyFrom ? (copyFrom.includes('.') ? copyFrom.split('.')[0] : copyFrom) : undefined;
+
+      const results: { created: string[]; skipped: string[]; failed: string[] } = {
+        created: [],
+        skipped: [],
+        failed: [],
+      };
+
+      if (copyFrom) {
+        // The workflow API requires explicit business service codes — it returns empty without a filter.
+        const knownServices = ['PGR', 'PT.CREATE', 'PT.UPDATE', 'NewTL', 'NewWS1', 'NewSW1', 'FSM', 'BPAREG', 'BPA'];
+        // Search at the source root level (workflow resolves hierarchy)
+        const sourceServices = await digitApi.workflowBusinessServiceSearch(sourceRoot!, knownServices);
+        if (sourceServices.length === 0) {
+          return JSON.stringify({
+            success: false,
+            error: `No workflow business services found in source "${sourceRoot}" for known codes (${knownServices.join(', ')}). ` +
+              `Try a different source tenant.`,
+          }, null, 2);
+        }
+
+        // Build UUID→stateName map for resolving nextState references
+        const buildStateMap = (states: Record<string, unknown>[]): Map<string, string> => {
+          const map = new Map<string, string>();
+          for (const s of states) {
+            if (s.uuid && s.state) map.set(s.uuid as string, s.state as string);
+          }
+          return map;
+        };
+
+        for (const bs of sourceServices) {
+          const bsCode = bs.businessService as string;
+          try {
+            // Check if already exists at target root
+            const existing = await digitApi.workflowBusinessServiceSearch(stateRoot, [bsCode]);
+            if (existing.length > 0) {
+              results.skipped.push(bsCode);
+              continue;
+            }
+
+            const sourceStates = (bs.states || []) as Record<string, unknown>[];
+            const stateMap = buildStateMap(sourceStates);
+
+            // Strip IDs/audit, resolve UUID nextState references to state names
+            const cleanStates = sourceStates.map((s) => ({
+              state: s.state,
+              applicationStatus: s.applicationStatus,
+              docUploadRequired: s.docUploadRequired,
+              isStartState: s.isStartState,
+              isTerminateState: s.isTerminateState,
+              isStateUpdatable: s.isStateUpdatable,
+              actions: ((s.actions || []) as Record<string, unknown>[]).map((a) => {
+                const nextState = a.nextState as string;
+                // nextState might be a UUID reference — resolve to state name
+                const resolvedNext = stateMap.get(nextState) || nextState;
+                return {
+                  action: a.action,
+                  nextState: resolvedNext,
+                  roles: a.roles,
+                  active: a.active,
+                };
+              }),
+            }));
+
+            const result = await digitApi.workflowBusinessServiceCreate(stateRoot, {
+              businessService: bsCode,
+              business: bs.business,
+              businessServiceSla: bs.businessServiceSla,
+              states: cleanStates,
+            });
+
+            // Validate the response actually has data
+            if (result.uuid || result.businessService) {
+              results.created.push(bsCode);
+            } else {
+              results.failed.push(`${bsCode}: API returned 200 but no data — possible tenant/auth issue`);
+            }
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            if (msg.includes('DUPLICATE') || msg.includes('already exists') || msg.includes('unique')) {
+              results.skipped.push(bsCode);
+            } else {
+              results.failed.push(`${bsCode}: ${msg}`);
+            }
+          }
+        }
+
+        return JSON.stringify({
+          success: results.failed.length === 0 && (results.created.length > 0 || results.skipped.length > 0),
+          tenantId: stateRoot,
+          resolvedFrom: inputTenantId !== stateRoot ? inputTenantId : undefined,
+          source: sourceRoot,
+          summary: {
+            created: results.created.length,
+            skipped: results.skipped.length,
+            failed: results.failed.length,
+          },
+          results,
+          hint: results.created.length > 0
+            ? `Workflow registered at root "${stateRoot}". All city-level tenants (e.g. "${inputTenantId}") inherit automatically.`
+            : undefined,
+        }, null, 2);
+      }
+
+      // Manual creation
+      const bsCode = args.business_service as string;
+      if (!bsCode || !args.states) {
+        return JSON.stringify({
+          success: false,
+          error: 'Either provide copy_from_tenant to clone an existing workflow, or provide business_service + states for manual creation.',
+        }, null, 2);
+      }
+
+      try {
+        const result = await digitApi.workflowBusinessServiceCreate(stateRoot, {
+          businessService: bsCode,
+          business: args.business as string || bsCode.toLowerCase(),
+          businessServiceSla: args.business_service_sla as number || 259200000,
+          states: args.states,
+        });
+
+        if (!result.uuid && !result.businessService) {
+          return JSON.stringify({
+            success: false,
+            error: `API returned 200 but no data for "${bsCode}" on "${stateRoot}". The workflow service may require the tenant to be pre-configured.`,
+          }, null, 2);
+        }
+
+        return JSON.stringify({
+          success: true,
+          message: `Workflow "${bsCode}" created for tenant "${stateRoot}"`,
+          resolvedFrom: inputTenantId !== stateRoot ? inputTenantId : undefined,
+          businessService: {
+            businessService: result.businessService,
+            business: result.business,
+            tenantId: result.tenantId,
+            stateCount: ((result.states || []) as unknown[]).length,
+          },
+        }, null, 2);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return JSON.stringify({ success: false, error: msg }, null, 2);
+      }
     },
   } satisfies ToolMetadata);
 }

@@ -35,6 +35,7 @@ export const ENDPOINTS = {
 
   // Workflow
   WORKFLOW_BUSINESS_SERVICE_SEARCH: '/egov-workflow-v2/egov-wf/businessservice/_search',
+  WORKFLOW_BUSINESS_SERVICE_CREATE: '/egov-workflow-v2/egov-wf/businessservice/_create',
   WORKFLOW_PROCESS_SEARCH: '/egov-workflow-v2/egov-wf/process/_search',
 
   // Filestore
