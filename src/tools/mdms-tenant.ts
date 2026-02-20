@@ -587,6 +587,121 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
     },
   } satisfies ToolMetadata);
 
+  // tenant_bootstrap — copy ALL schemas + essential data from an existing tenant root to a new one
+  registry.register({
+    name: 'tenant_bootstrap',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'write',
+    description:
+      'Bootstrap a new state-level tenant root by copying ALL schemas and essential MDMS data from an existing tenant (e.g. "pg"). ' +
+      'This is REQUIRED before creating employees, PGR complaints, or any service under a new tenant root. ' +
+      'Copies: all schema definitions, IdFormat records, Department records, Designation records, and StateInfo. ' +
+      'Call this ONCE when you create a new tenant root (e.g. "tenant", "ke") before doing anything else under it.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        target_tenant: {
+          type: 'string',
+          description: 'The new tenant root to bootstrap (e.g. "tenant", "ke")',
+        },
+        source_tenant: {
+          type: 'string',
+          description: 'Existing tenant root to copy from (default: "pg")',
+        },
+      },
+      required: ['target_tenant'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const target = args.target_tenant as string;
+      const source = (args.source_tenant as string) || 'pg';
+
+      const results: {
+        schemas: { copied: string[]; skipped: string[]; failed: string[] };
+        data: { copied: string[]; skipped: string[]; failed: string[] };
+      } = {
+        schemas: { copied: [], skipped: [], failed: [] },
+        data: { copied: [], skipped: [], failed: [] },
+      };
+
+      // Step 1: Copy ALL schemas from source to target
+      const sourceSchemas = await digitApi.mdmsSchemaSearch(source);
+      for (const schema of sourceSchemas) {
+        const code = schema.code as string;
+        const definition = schema.definition as Record<string, unknown>;
+        const description = (schema.description as string) || code;
+        try {
+          await digitApi.mdmsSchemaCreate(target, code, description, definition);
+          results.schemas.copied.push(code);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          if (msg.includes('DUPLICATE') || msg.includes('already exists') || msg.includes('unique')) {
+            results.schemas.skipped.push(code);
+          } else {
+            results.schemas.failed.push(`${code}: ${msg}`);
+          }
+        }
+      }
+
+      // Step 2: Copy essential MDMS data records
+      const essentialSchemas = [
+        'common-masters.IdFormat',
+        'common-masters.Department',
+        'common-masters.Designation',
+        'common-masters.StateInfo',
+        'common-masters.GenderType',
+        'egov-hrms.EmployeeStatus',
+        'egov-hrms.EmployeeType',
+        'egov-hrms.DeactivationReason',
+        'RAINMAKER-PGR.ServiceDefs',
+        'Workflow.BusinessService',
+      ];
+
+      for (const schemaCode of essentialSchemas) {
+        try {
+          const records = await digitApi.mdmsV2SearchRaw(source, schemaCode, { limit: 500 });
+          for (const record of records) {
+            try {
+              await digitApi.mdmsV2Create(
+                target,
+                schemaCode,
+                record.uniqueIdentifier,
+                record.data
+              );
+              results.data.copied.push(`${schemaCode}/${record.uniqueIdentifier}`);
+            } catch (error) {
+              const msg = error instanceof Error ? error.message : String(error);
+              if (msg.includes('DUPLICATE') || msg.includes('already exists') || msg.includes('unique') || msg.includes('NON_UNIQUE')) {
+                results.data.skipped.push(`${schemaCode}/${record.uniqueIdentifier}`);
+              } else {
+                results.data.failed.push(`${schemaCode}/${record.uniqueIdentifier}: ${msg}`);
+              }
+            }
+          }
+        } catch {
+          // Schema might not have data in source — that's OK
+        }
+      }
+
+      return JSON.stringify({
+        success: results.schemas.failed.length === 0 && results.data.failed.length === 0,
+        source,
+        target,
+        summary: {
+          schemas_copied: results.schemas.copied.length,
+          schemas_skipped: results.schemas.skipped.length,
+          schemas_failed: results.schemas.failed.length,
+          data_copied: results.data.copied.length,
+          data_skipped: results.data.skipped.length,
+          data_failed: results.data.failed.length,
+        },
+        results,
+      }, null, 2);
+    },
+  } satisfies ToolMetadata);
+
   // mdms_create — create MDMS record
   registry.register({
     name: 'mdms_create',
@@ -620,29 +735,51 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
     handler: async (args) => {
       await ensureAuthenticated();
 
-      const result = await digitApi.mdmsV2Create(
-        args.tenant_id as string,
-        args.schema_code as string,
-        args.unique_identifier as string,
-        args.data as Record<string, unknown>
-      );
+      const tenantId = args.tenant_id as string;
+      const schemaCode = args.schema_code as string;
 
-      return JSON.stringify(
-        {
-          success: true,
-          message: `Created MDMS record: ${result.uniqueIdentifier}`,
-          record: {
-            id: result.id,
-            tenantId: result.tenantId,
-            schemaCode: result.schemaCode,
-            uniqueIdentifier: result.uniqueIdentifier,
-            data: result.data,
-            isActive: result.isActive,
+      try {
+        const result = await digitApi.mdmsV2Create(
+          tenantId,
+          schemaCode,
+          args.unique_identifier as string,
+          args.data as Record<string, unknown>
+        );
+
+        return JSON.stringify(
+          {
+            success: true,
+            message: `Created MDMS record: ${result.uniqueIdentifier}`,
+            record: {
+              id: result.id,
+              tenantId: result.tenantId,
+              schemaCode: result.schemaCode,
+              uniqueIdentifier: result.uniqueIdentifier,
+              data: result.data,
+              isActive: result.isActive,
+            },
           },
-        },
-        null,
-        2
-      );
+          null,
+          2
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const stateRoot = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
+
+        let hint: string;
+        if (msg.includes('Schema definition') && msg.includes('not found')) {
+          hint = `Schema "${schemaCode}" is not registered for the "${stateRoot}" tenant root. ` +
+            `FIX: Call tenant_bootstrap with target_tenant="${stateRoot}" to copy all schemas and data from pg. ` +
+            `Or call mdms_schema_create with tenant_id="${stateRoot}", code="${schemaCode}", copy_from_tenant="pg".`;
+        } else if (msg.includes('NON_UNIQUE') || msg.includes('DUPLICATE') || msg.includes('already exists')) {
+          hint = `Record already exists. Use mdms_search to find it.`;
+        } else {
+          hint = `MDMS create failed. Verify the tenant "${stateRoot}" has all required schemas registered. ` +
+            `Call tenant_bootstrap with target_tenant="${stateRoot}" if this is a new tenant root.`;
+        }
+
+        return JSON.stringify({ success: false, error: msg, hint }, null, 2);
+      }
     },
   } satisfies ToolMetadata);
 }

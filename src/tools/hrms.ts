@@ -175,14 +175,10 @@ export function registerHrmsTools(registry: ToolRegistry): void {
           hint = 'An employee with this mobile number may already exist for this tenant. Use validate_employees to search existing employees.';
         } else if (isIdgenError) {
           const stateRoot = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
-          hint = `Employee ID generation failed for tenant "${tenantId}". The idgen service uses [CITY.CODE] from MDMS to generate employee codes. ` +
-            `To fix this, run these steps in order:\n` +
-            `1. Register the IdFormat schema for the "${stateRoot}" root: call mdms_schema_create with tenant_id="${stateRoot}", code="common-masters.IdFormat", copy_from_tenant="pg"\n` +
-            `2. Create the HRMS employee ID format: call mdms_create with tenant_id="${stateRoot}", schema_code="common-masters.IdFormat", ` +
-            `unique_identifier="egov.employee.code", data={"format":"[CITY.CODE]-[SEQ_EGOV_COMMON_[TENANT_ID]]","idname":"egov.employee.code"}\n` +
-            `3. Also ensure these schemas exist for "${stateRoot}" (copy from "pg" via mdms_schema_create): ` +
-            `common-masters.Department, common-masters.Designation, egov-hrms.EmployeeStatus, egov-hrms.EmployeeType, egov-hrms.DeactivationReason\n` +
-            `4. Retry the employee_create call after registering the schemas and ID format.`;
+          hint = `Employee ID generation failed. The "${stateRoot}" tenant root is missing required MDMS schemas and data (IdFormat, Department, etc). ` +
+            `FIX: Call tenant_bootstrap with target_tenant="${stateRoot}" (and source_tenant="pg"). ` +
+            `This copies all schemas and essential data (ID formats, departments, designations, etc.) from pg to ${stateRoot}. ` +
+            `Then retry employee_create.`;
         } else if (isUserError) {
           hint = 'The underlying user creation failed. The mobile number may already be registered, or the user service rejected the request. ' +
             'Use user_search to check if a user with this mobile number already exists.';
