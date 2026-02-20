@@ -156,38 +156,38 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         );
       }
 
-      // Try login with the resolved tenant. If an explicit tenant was given and login fails,
-      // retry with the default tenant (the user might be an admin from the default root).
-      let loginError: string | null = null;
-      let usedLoginTenant = loginTenantId;
+      // Try login with multiple tenant candidates. DIGIT employees may only be findable
+      // at the exact city-level tenant (e.g. "tenant.coimbatore"), the state root ("tenant"),
+      // or the environment default ("pg"). Try all unique candidates in order.
+      const loginCandidates: string[] = [];
+      if (explicitRoot) loginCandidates.push(explicitRoot);
+      if (explicitTenantId && explicitTenantId !== explicitRoot) loginCandidates.push(explicitTenantId);
+      if (defaultLoginTenant && !loginCandidates.includes(defaultLoginTenant)) loginCandidates.push(defaultLoginTenant);
+      if (loginCandidates.length === 0) loginCandidates.push(defaultLoginTenant);
 
-      try {
-        await digitApi.login(username, password, loginTenantId);
-      } catch (error) {
-        // If we tried a non-default tenant and it failed, retry with the default
-        if (explicitRoot && loginTenantId !== defaultLoginTenant) {
-          try {
-            await digitApi.login(username, password, defaultLoginTenant);
-            usedLoginTenant = defaultLoginTenant;
-          } catch {
-            loginError = error instanceof Error ? error.message : String(error);
-          }
-        } else {
+      let loginError: string | null = null;
+      let usedLoginTenant = loginCandidates[0];
+
+      for (const candidate of loginCandidates) {
+        try {
+          await digitApi.login(username, password, candidate);
+          usedLoginTenant = candidate;
+          loginError = null;
+          break;
+        } catch (error) {
           loginError = error instanceof Error ? error.message : String(error);
         }
       }
 
       if (loginError) {
-        const triedTenants = explicitRoot && loginTenantId !== defaultLoginTenant
-          ? `"${loginTenantId}" and "${defaultLoginTenant}"`
-          : `"${loginTenantId}"`;
+        const triedTenants = loginCandidates.map((t) => `"${t}"`).join(', ');
         return JSON.stringify(
           {
             success: false,
-            error: loginError,
+            error: 'Invalid login credentials',
             environment: { name: env.name, url: env.url },
             triedLoginTenants: triedTenants,
-            hint: `Login failed against tenant ${triedTenants}. ` +
+            hint: `Login failed against tenants: ${triedTenants}. ` +
               `IMPORTANT: HRMS employee usernames are the EMPLOYEE CODE (e.g. "EMP-LIVE-000057"), NOT the mobile number. ` +
               `Check the employee_create response for the "code" field and use that as the username. ` +
               `Default password is "eGov@123".`,

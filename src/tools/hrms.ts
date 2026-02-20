@@ -146,6 +146,20 @@ export function registerHrmsTools(registry: ToolRegistry): void {
         const created = result[0];
         const user = created.user as Record<string, unknown> | undefined;
 
+        // HRMS doesn't reliably set the user password. Reset it via user update
+        // so the employee can actually login.
+        if (user?.uuid) {
+          try {
+            const searchTenant = env.stateTenantId;
+            const users = await digitApi.userSearch(searchTenant, { uuid: [user.uuid as string], limit: 1 });
+            if (users.length > 0) {
+              await digitApi.userUpdate({ ...users[0], password: 'eGov@123' });
+            }
+          } catch {
+            // Non-fatal: employee was created, password reset just failed
+          }
+        }
+
         return JSON.stringify(
           {
             success: true,
