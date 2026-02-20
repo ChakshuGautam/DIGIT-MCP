@@ -645,7 +645,32 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         }
       }
 
-      // Step 2: Copy essential MDMS data records
+      // Step 2: Create the root tenant record under itself
+      // CRITICAL: tenant.tenants records MUST exist under the tenant's own root,
+      // because services like idgen resolve city codes via v1 MDMS using the tenant prefix as root.
+      try {
+        await digitApi.mdmsV2Create(target, 'tenant.tenants', target, {
+          code: target,
+          name: target,
+          description: `State tenant root: ${target}`,
+          city: {
+            code: target.toUpperCase(),
+            name: target,
+            districtCode: target.toUpperCase(),
+            districtName: target,
+          },
+        });
+        results.data.copied.push(`tenant.tenants/${target} (root self-record)`);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.includes('DUPLICATE') || msg.includes('already exists') || msg.includes('unique') || msg.includes('NON_UNIQUE')) {
+          results.data.skipped.push(`tenant.tenants/${target} (root self-record)`);
+        } else {
+          results.data.failed.push(`tenant.tenants/${target}: ${msg}`);
+        }
+      }
+
+      // Step 3: Copy essential MDMS data records
       const essentialSchemas = [
         'common-masters.IdFormat',
         'common-masters.Department',

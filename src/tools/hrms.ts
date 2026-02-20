@@ -175,10 +175,9 @@ export function registerHrmsTools(registry: ToolRegistry): void {
           hint = 'An employee with this mobile number may already exist for this tenant. Use validate_employees to search existing employees.';
         } else if (isIdgenError) {
           const stateRoot = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
-          hint = `Employee ID generation failed. The "${stateRoot}" tenant root is missing required MDMS schemas and data (IdFormat, Department, etc). ` +
-            `FIX: Call tenant_bootstrap with target_tenant="${stateRoot}" (and source_tenant="pg"). ` +
-            `This copies all schemas and essential data (ID formats, departments, designations, etc.) from pg to ${stateRoot}. ` +
-            `Then retry employee_create.`;
+          hint = `Employee ID generation failed. The idgen service resolves city codes via MDMS v1, which requires tenant.tenants records under the "${stateRoot}" root. ` +
+            `FIX: Call tenant_bootstrap with target_tenant="${stateRoot}" (source_tenant="pg"). ` +
+            `This copies all schemas, ID formats, and creates the root self-record needed for idgen to resolve city codes. Then retry employee_create.`;
         } else if (isUserError) {
           hint = 'The underlying user creation failed. The mobile number may already be registered, or the user service rejected the request. ' +
             'Use user_search to check if a user with this mobile number already exists.';
