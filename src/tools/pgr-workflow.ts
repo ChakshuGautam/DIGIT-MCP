@@ -96,7 +96,10 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
     category: 'pgr',
     risk: 'write',
     description:
-      'Create a new PGR complaint/service request. Requires tenant ID, a valid service code (from validate_complaint_types), description, address with boundary locality code, and citizen info (name + mobile number of the person filing the complaint).',
+      'Create a new PGR complaint/service request. Requires tenant ID, a valid service code (from validate_complaint_types), description, address with boundary locality code, and citizen info (name + mobile number of the person filing the complaint). ' +
+      'The logged-in user does NOT need to be a citizen — any user with EMPLOYEE, CITIZEN, or CSR role can create complaints. ' +
+      'The ADMIN user already has EMPLOYEE role and can create complaints for any tenant. Pass citizen details via citizen_name/citizen_mobile. ' +
+      'You do NOT need to re-authenticate as a different user to create complaints.',
     inputSchema: {
       type: 'object' as const,
       properties: {

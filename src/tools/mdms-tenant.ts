@@ -124,20 +124,22 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       const env = digitApi.getEnvironmentInfo();
       const username = (args.username as string) || process.env.CRS_USERNAME;
       const password = (args.password as string) || process.env.CRS_PASSWORD;
+      const explicitTenantId = (args.tenant_id as string) || (args.state_tenant as string);
+      const defaultLoginTenant = process.env.CRS_TENANT_ID || env.stateTenantId;
 
-      // Login always uses the user's home tenant (CRS_TENANT_ID or env default)
-      // to ensure the correct user record and full role set is returned.
-      // tenant_id and state_tenant only affect the operational context.
-      const loginTenantId = process.env.CRS_TENANT_ID || env.stateTenantId;
+      // Login tenant resolution:
+      // If the user provides explicit credentials + tenant_id, use that tenant (or its root) for login.
+      // Users created under a non-default root (e.g. "tenant") only exist in that root's user store.
+      // Fall back to CRS_TENANT_ID / env default when no explicit tenant is given.
+      const explicitRoot = explicitTenantId
+        ? (explicitTenantId.includes('.') ? explicitTenantId.split('.')[0] : explicitTenantId)
+        : null;
+      const loginTenantId = explicitRoot || defaultLoginTenant;
 
-      // Determine the desired operational state tenant:
-      // explicit state_tenant > tenant_id > current default
-      const desiredStateTenant = (args.state_tenant as string)
-        || (args.tenant_id as string)
-        || null;
+      // Desired operational state tenant
+      const desiredStateTenant = explicitRoot || null;
 
       if (!username || !password) {
-        // Apply state tenant even without login
         if (desiredStateTenant) {
           digitApi.setStateTenant(desiredStateTenant);
         }
@@ -154,49 +156,75 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         );
       }
 
+      // Try login with the resolved tenant. If an explicit tenant was given and login fails,
+      // retry with the default tenant (the user might be an admin from the default root).
+      let loginError: string | null = null;
+      let usedLoginTenant = loginTenantId;
+
       try {
         await digitApi.login(username, password, loginTenantId);
-
-        // Set the operational state tenant (overrides auto-detection from login)
-        if (desiredStateTenant) {
-          digitApi.setStateTenant(desiredStateTenant);
-        }
-
-        const auth = digitApi.getAuthInfo();
-        const envAfterLogin = digitApi.getEnvironmentInfo();
-
-        return JSON.stringify(
-          {
-            success: true,
-            message: `Authenticated as "${username}" on ${envAfterLogin.name}`,
-            environment: { name: envAfterLogin.name, url: envAfterLogin.url },
-            stateTenantId: envAfterLogin.stateTenantId,
-            loginTenantId,
-            user: auth.user
-              ? {
-                  userName: auth.user.userName,
-                  name: auth.user.name,
-                  tenantId: auth.user.tenantId,
-                  roles: auth.user.roles?.map((r) => r.code),
-                }
-              : null,
-          },
-          null,
-          2
-        );
       } catch (error) {
+        // If we tried a non-default tenant and it failed, retry with the default
+        if (explicitRoot && loginTenantId !== defaultLoginTenant) {
+          try {
+            await digitApi.login(username, password, defaultLoginTenant);
+            usedLoginTenant = defaultLoginTenant;
+          } catch {
+            loginError = error instanceof Error ? error.message : String(error);
+          }
+        } else {
+          loginError = error instanceof Error ? error.message : String(error);
+        }
+      }
+
+      if (loginError) {
+        const triedTenants = explicitRoot && loginTenantId !== defaultLoginTenant
+          ? `"${loginTenantId}" and "${defaultLoginTenant}"`
+          : `"${loginTenantId}"`;
         return JSON.stringify(
           {
             success: false,
-            error: error instanceof Error ? error.message : String(error),
+            error: loginError,
             environment: { name: env.name, url: env.url },
-            stateTenantId: env.stateTenantId,
-            hint: 'Check username/password and ensure the environment is reachable.',
+            triedLoginTenants: triedTenants,
+            hint: `Login failed against tenant ${triedTenants}. ` +
+              `IMPORTANT: HRMS employee usernames are the EMPLOYEE CODE (e.g. "EMP-LIVE-000057"), NOT the mobile number. ` +
+              `Check the employee_create response for the "code" field and use that as the username. ` +
+              `Default password is "eGov@123". ` +
+              `Also note: you do NOT need to re-authenticate to create PGR complaints — the ADMIN user with EMPLOYEE role can call pgr_create directly.`,
           },
           null,
           2
         );
       }
+
+      // Set the operational state tenant
+      if (desiredStateTenant) {
+        digitApi.setStateTenant(desiredStateTenant);
+      }
+
+      const auth = digitApi.getAuthInfo();
+      const envAfterLogin = digitApi.getEnvironmentInfo();
+
+      return JSON.stringify(
+        {
+          success: true,
+          message: `Authenticated as "${username}" on ${envAfterLogin.name}`,
+          environment: { name: envAfterLogin.name, url: envAfterLogin.url },
+          stateTenantId: envAfterLogin.stateTenantId,
+          loginTenantId: usedLoginTenant,
+          user: auth.user
+            ? {
+                userName: auth.user.userName,
+                name: auth.user.name,
+                tenantId: auth.user.tenantId,
+                roles: auth.user.roles?.map((r) => r.code),
+              }
+            : null,
+        },
+        null,
+        2
+      );
     },
   } satisfies ToolMetadata);
 

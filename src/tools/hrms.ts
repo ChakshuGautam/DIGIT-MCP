@@ -160,6 +160,12 @@ export function registerHrmsTools(registry: ToolRegistry): void {
               tenantId: created.tenantId,
               roles: ((user?.roles || []) as Array<{ code: string }>).map((r) => r.code),
             },
+            loginCredentials: {
+              username: created.code,
+              password: 'eGov@123',
+              loginTenantId: env.stateTenantId,
+              note: 'To authenticate as this employee, use the employee CODE as the username (not mobile number).',
+            },
           },
           null,
           2
@@ -169,9 +175,15 @@ export function registerHrmsTools(registry: ToolRegistry): void {
         const isDuplicate = msg.includes('already exists') || msg.includes('duplicate') || msg.includes('ALREADY_ACTIVE');
         const isIdgenError = msg.includes('Unable to create ids') || msg.includes('citycode') || msg.includes('idgen') || msg.includes('UnrecognizedPropertyException') || msg.includes('ResponseInfo');
         const isUserError = msg.includes('InvalidUserCreate') || msg.includes('user') || msg.includes('mobile');
+        const isRoleError = msg.includes('Invalid role') || msg.includes('role assigned');
 
         let hint: string;
-        if (isDuplicate) {
+        if (isRoleError) {
+          hint = 'HRMS only accepts employee-type roles (EMPLOYEE, GRO, PGR_LME, DGRO, etc). ' +
+            'CITIZEN and CSR are NOT valid HRMS roles — they are user-service roles used for PGR complaint filing. ' +
+            'You do NOT need CITIZEN/CSR roles on employees to create complaints. The ADMIN user with EMPLOYEE role can create PGR complaints via pgr_create. ' +
+            'Use access_roles_search to list valid HRMS role codes.';
+        } else if (isDuplicate) {
           hint = 'An employee with this mobile number may already exist for this tenant. Use validate_employees to search existing employees.';
         } else if (isIdgenError) {
           const stateRoot = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
