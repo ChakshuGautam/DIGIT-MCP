@@ -120,4 +120,76 @@ export function registerDocsTools(registry: ToolRegistry): void {
       }
     },
   } satisfies ToolMetadata);
+
+  registry.register({
+    name: 'docs_get',
+    group: 'docs',
+    category: 'docs',
+    risk: 'read',
+    description:
+      'Fetch the full markdown content of a DIGIT documentation page. Use docs_search first to find the URL, then pass it here to read the complete page. Accepts any docs.digit.org URL.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        url: {
+          type: 'string',
+          description: 'The docs.digit.org page URL (e.g. "https://docs.digit.org/platform/platform/core-services/mdms-v2-master-data-management-service")',
+        },
+      },
+      required: ['url'],
+    },
+    handler: async (args) => {
+      const url = args.url as string;
+      if (!url?.trim()) {
+        return JSON.stringify({ success: false, error: 'url is required' });
+      }
+
+      // Ensure it's a docs.digit.org URL
+      if (!url.includes('docs.digit.org')) {
+        return JSON.stringify({
+          success: false,
+          error: 'URL must be a docs.digit.org page',
+          hint: 'Use docs_search to find valid documentation URLs.',
+        });
+      }
+
+      // Append .md if not already present
+      const mdUrl = url.endsWith('.md') ? url : `${url}.md`;
+
+      try {
+        const response = await fetch(mdUrl);
+        if (!response.ok) {
+          return JSON.stringify({
+            success: false,
+            error: `HTTP ${response.status}: ${response.statusText}`,
+            url: mdUrl,
+            hint: 'The page may not exist. Use docs_search to find valid URLs.',
+          }, null, 2);
+        }
+
+        const contentType = response.headers.get('content-type') || '';
+        if (!contentType.includes('text/markdown') && !contentType.includes('text/plain')) {
+          return JSON.stringify({
+            success: false,
+            error: `Unexpected content type: ${contentType}`,
+            url: mdUrl,
+          }, null, 2);
+        }
+
+        const markdown = await response.text();
+        return JSON.stringify({
+          success: true,
+          url: mdUrl,
+          content: markdown,
+        }, null, 2);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return JSON.stringify({
+          success: false,
+          error: `Failed to fetch page: ${message}`,
+          url: mdUrl,
+        }, null, 2);
+      }
+    },
+  } satisfies ToolMetadata);
 }
