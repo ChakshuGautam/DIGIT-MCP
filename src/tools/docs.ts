@@ -162,7 +162,6 @@ export function registerDocsTools(registry: ToolRegistry): void {
           return JSON.stringify({
             success: false,
             error: `HTTP ${response.status}: ${response.statusText}`,
-            url: mdUrl,
             hint: 'The page may not exist. Use docs_search to find valid URLs.',
           }, null, 2);
         }
@@ -172,14 +171,15 @@ export function registerDocsTools(registry: ToolRegistry): void {
           return JSON.stringify({
             success: false,
             error: `Unexpected content type: ${contentType}`,
-            url: mdUrl,
           }, null, 2);
         }
 
         const markdown = await response.text();
+        // Return the original URL (not the .md one) so agents don't bypass docs_get
+        const displayUrl = url.endsWith('.md') ? url.replace(/\.md$/, '') : url;
         return JSON.stringify({
           success: true,
-          url: mdUrl,
+          url: displayUrl,
           content: markdown,
         }, null, 2);
       } catch (err) {
@@ -187,7 +187,6 @@ export function registerDocsTools(registry: ToolRegistry): void {
         return JSON.stringify({
           success: false,
           error: `Failed to fetch page: ${message}`,
-          url: mdUrl,
         }, null, 2);
       }
     },
