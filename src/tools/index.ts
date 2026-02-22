@@ -10,6 +10,7 @@ import { registerEncryptionTools } from './encryption.js';
 import { registerHealthCheckTools } from './health-check.js';
 import { registerHrmsTools } from './hrms.js';
 import { registerUserTools } from './user.js';
+import { registerDocsTools } from './docs.js';
 
 export function registerAllTools(registry: ToolRegistry): void {
   registerDiscoverTools(registry);
@@ -23,4 +24,5 @@ export function registerAllTools(registry: ToolRegistry): void {
   registerHealthCheckTools(registry);
   registerHrmsTools(registry);
   registerUserTools(registry);
+  registerDocsTools(registry);
 }

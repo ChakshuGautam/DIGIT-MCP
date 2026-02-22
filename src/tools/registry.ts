@@ -2,7 +2,7 @@ import type { ToolGroup, ToolMetadata } from '../types/index.js';
 
 export class ToolRegistry {
   private tools: Map<string, ToolMetadata> = new Map();
-  private enabledGroups: Set<ToolGroup> = new Set(['core']);
+  private enabledGroups: Set<ToolGroup> = new Set(['core', 'docs']);
   private onToolListChanged?: () => void;
 
   setToolListChangedCallback(cb: () => void): void {
