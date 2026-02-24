@@ -11,6 +11,9 @@ import { registerHealthCheckTools } from './health-check.js';
 import { registerHrmsTools } from './hrms.js';
 import { registerUserTools } from './user.js';
 import { registerDocsTools } from './docs.js';
+import { registerMonitoringTools } from './monitoring.js';
+import { registerTracingTools } from './tracing.js';
+import { registerApiCatalogTools } from './api-catalog.js';
 
 export function registerAllTools(registry: ToolRegistry): void {
   registerDiscoverTools(registry);
@@ -25,4 +28,7 @@ export function registerAllTools(registry: ToolRegistry): void {
   registerHrmsTools(registry);
   registerUserTools(registry);
   registerDocsTools(registry);
+  registerMonitoringTools(registry);
+  registerTracingTools(registry);
+  registerApiCatalogTools(registry);
 }
