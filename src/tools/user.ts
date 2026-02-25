@@ -154,19 +154,22 @@ export function registerUserTools(registry: ToolRegistry): void {
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;
-      const env = digitApi.getEnvironmentInfo();
       const userType = (args.user_type as string) || 'CITIZEN';
       const mobileNumber = args.mobile_number as string;
+
+      // Derive role tenant from the target tenant's root (not env.stateTenantId)
+      // e.g. "tenant.city1" → "tenant", "pg.citya" → "pg", "pg" → "pg"
+      const roleTenant = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
 
       const roles = ((args.roles as Array<{ code: string; name: string }>) || []).map((r) => ({
         code: r.code,
         name: r.name,
-        tenantId: env.stateTenantId,
+        tenantId: roleTenant,
       }));
 
       // Ensure appropriate default role
       if (userType === 'CITIZEN' && !roles.some((r) => r.code === 'CITIZEN')) {
-        roles.push({ code: 'CITIZEN', name: 'Citizen', tenantId: env.stateTenantId });
+        roles.push({ code: 'CITIZEN', name: 'Citizen', tenantId: roleTenant });
       }
 
       const user: Record<string, unknown> = {
@@ -179,7 +182,7 @@ export function registerUserTools(registry: ToolRegistry): void {
         emailId: (args.email as string) || null,
         gender: (args.gender as string) || null,
         roles,
-        tenantId: env.stateTenantId,
+        tenantId: roleTenant,
       };
 
       try {

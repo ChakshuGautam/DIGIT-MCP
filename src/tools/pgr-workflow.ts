@@ -161,7 +161,7 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         if (existing.length > 0) {
           citizenUser = existing[0];
           // Reset password in case it was created by PGR previously (OTP-only)
-          try { await digitApi.userUpdate({ ...citizenUser, password: 'eGov@123' }); } catch { /* non-fatal */ }
+          try { await digitApi.userUpdate({ ...citizenUser, password: 'eGov@123' }); } catch (pwErr) { console.error(`[pgr_create] Citizen password reset failed: ${pwErr instanceof Error ? pwErr.message : String(pwErr)}`); }
         } else {
           // Create new citizen with password auth.
           // IMPORTANT: Use type EMPLOYEE (not CITIZEN) because DIGIT's OAuth only supports
@@ -183,8 +183,9 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
           password: 'eGov@123',
           loginTenantId: rootTenant,
         };
-      } catch {
+      } catch (citizenErr) {
         // Non-fatal: PGR will auto-create the citizen (but without password auth)
+        console.error(`[pgr_create] Citizen pre-creation failed: ${citizenErr instanceof Error ? citizenErr.message : String(citizenErr)}`);
       }
 
       const citizen = {

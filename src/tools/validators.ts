@@ -25,8 +25,10 @@ function buildOrderedLevels(
   if (!root) return hierarchy.map((h) => h.boundaryType);
 
   const ordered: string[] = [];
+  const visited = new Set<string>();
   let current: string | undefined = root;
-  while (current) {
+  while (current && !visited.has(current)) {
+    visited.add(current);
     ordered.push(current);
     current = childMap.get(current);
   }
@@ -704,7 +706,7 @@ export function registerValidatorTools(registry: ToolRegistry): void {
                   hierarchyLevels = buildOrderedLevels(hier.boundaryHierarchy);
                 }
               }
-            } catch { /* use user-provided order */ }
+            } catch (fetchErr) { console.error(`[boundary_create] Hierarchy fetch failed, using user-provided order: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`); }
             if (hierarchyLevels.length === 0) hierarchyLevels = hierarchyDef;
           } else {
             results.hierarchy = { action: 'error', error: msg };

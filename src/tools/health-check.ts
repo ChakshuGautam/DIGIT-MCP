@@ -195,10 +195,8 @@ export function registerHealthCheckTools(registry: ToolRegistry): void {
           }
 
           const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-          if (probe.requiresAuth && authInfo.authenticated) {
-            // Access token via a lightweight probe — we use fetch directly
-            // The digitApi client handles auth internally, but for health probes
-            // we do raw fetch to measure actual response times
+          if (probe.requiresAuth && authInfo.authenticated && authInfo.token) {
+            headers['Authorization'] = `Bearer ${authInfo.token}`;
           }
 
           const controller = new AbortController();
@@ -211,7 +209,7 @@ export function registerHealthCheckTools(registry: ToolRegistry): void {
                   ver: '1.0',
                   ts: Date.now(),
                   msgId: `${Date.now()}|en_IN`,
-                  authToken: authInfo.authenticated ? '' : '',
+                  authToken: authInfo.token || '',
                 },
                 ...probeData.body,
               })

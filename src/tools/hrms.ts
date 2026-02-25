@@ -84,18 +84,21 @@ export function registerHrmsTools(registry: ToolRegistry): void {
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;
-      const env = digitApi.getEnvironmentInfo();
       const now = Date.now();
+
+      // Derive role tenant from the target tenant's root (not env.stateTenantId)
+      // e.g. "tenant.city1" → "tenant", "pg.citya" → "pg"
+      const roleTenant = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
 
       const roles = (args.roles as Array<{ code: string; name: string }>).map((r) => ({
         code: r.code,
         name: r.name,
-        tenantId: env.stateTenantId,
+        tenantId: roleTenant,
       }));
 
       // Ensure EMPLOYEE role is present
       if (!roles.some((r) => r.code === 'EMPLOYEE')) {
-        roles.push({ code: 'EMPLOYEE', name: 'Employee', tenantId: env.stateTenantId });
+        roles.push({ code: 'EMPLOYEE', name: 'Employee', tenantId: roleTenant });
       }
 
       const employee: Record<string, unknown> = {
@@ -114,7 +117,7 @@ export function registerHrmsTools(registry: ToolRegistry): void {
           type: 'EMPLOYEE',
           active: true,
           roles,
-          tenantId: env.stateTenantId,
+          tenantId: roleTenant,
         },
         assignments: [
           {
@@ -150,13 +153,14 @@ export function registerHrmsTools(registry: ToolRegistry): void {
         // so the employee can actually login.
         if (user?.uuid) {
           try {
-            const searchTenant = env.stateTenantId;
+            const searchTenant = roleTenant;
             const users = await digitApi.userSearch(searchTenant, { uuid: [user.uuid as string], limit: 1 });
             if (users.length > 0) {
               await digitApi.userUpdate({ ...users[0], password: 'eGov@123' });
             }
-          } catch {
+          } catch (pwErr) {
             // Non-fatal: employee was created, password reset just failed
+            console.error(`[employee_create] Password reset failed for ${user.uuid}: ${pwErr instanceof Error ? pwErr.message : String(pwErr)}`);
           }
         }
 
@@ -177,7 +181,7 @@ export function registerHrmsTools(registry: ToolRegistry): void {
             loginCredentials: {
               username: created.code,
               password: 'eGov@123',
-              loginTenantId: env.stateTenantId,
+              loginTenantId: roleTenant,
               note: 'To authenticate as this employee, use the employee CODE as the username (not mobile number).',
             },
           },
@@ -293,7 +297,9 @@ export function registerHrmsTools(registry: ToolRegistry): void {
 
       const tenantId = args.tenant_id as string;
       const employeeCode = args.employee_code as string;
-      const env = digitApi.getEnvironmentInfo();
+
+      // Derive role tenant from the target tenant's root
+      const roleTenant = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
 
       // Fetch current employee
       const employees = await digitApi.employeeSearch(tenantId, { codes: [employeeCode] });
@@ -314,7 +320,7 @@ export function registerHrmsTools(registry: ToolRegistry): void {
       if (addRoles?.length) {
         for (const role of addRoles) {
           if (!currentRoles.some((r) => r.code === role.code)) {
-            currentRoles.push({ code: role.code, name: role.name, tenantId: env.stateTenantId });
+            currentRoles.push({ code: role.code, name: role.name, tenantId: roleTenant });
           }
         }
       }

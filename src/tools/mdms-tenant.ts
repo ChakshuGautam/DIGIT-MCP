@@ -63,8 +63,9 @@ async function searchAllStateTenants(
           seenCodes.add(t.code as string);
         }
       }
-    } catch {
-      // Skip unreachable state tenants
+    } catch (err) {
+      // Skip unreachable state tenants — log for debugging
+      console.error(`[mdms_get_tenants] Failed to fetch tenants for state "${root}": ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -236,13 +237,13 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
               try {
                 await digitApi.login(username, password, explicitRoot);
                 usedLoginTenant = explicitRoot;
-              } catch {
-                // Fall back — roles are added but token stays on original tenant
+              } catch (reloginErr) {
+                console.error(`[configure] Re-login to "${explicitRoot}" failed after role provisioning: ${reloginErr instanceof Error ? reloginErr.message : String(reloginErr)}`);
               }
             }
           }
-        } catch {
-          // Non-fatal — login succeeded, role provisioning is best-effort
+        } catch (provErr) {
+          console.error(`[configure] Role provisioning failed: ${provErr instanceof Error ? provErr.message : String(provErr)}`);
         }
       }
 
@@ -796,8 +797,9 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
               results.data.failed.push(`${schemaCode}/${record.uniqueIdentifier}: ${msg}`);
             }
           }
-        } catch {
+        } catch (schemaErr) {
           // Schema might not have data in source — that's OK
+          console.error(`[tenant_bootstrap] Schema "${schemaCode}" data copy skipped: ${schemaErr instanceof Error ? schemaErr.message : String(schemaErr)}`);
         }
       }
 
@@ -865,8 +867,8 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
               };
             }
           }
-        } catch {
-          // User search on target may fail if tenant not fully ready — proceed to create
+        } catch (userSearchErr) {
+          console.error(`[tenant_bootstrap] User search on "${target}" failed, proceeding to create: ${userSearchErr instanceof Error ? userSearchErr.message : String(userSearchErr)}`);
         }
 
         if (!alreadyExists) {
@@ -1018,7 +1020,8 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           );
           results.mdms.deleted++;
           results.mdms.schemas[record.schemaCode] = (results.mdms.schemas[record.schemaCode] || 0) + 1;
-        } catch {
+        } catch (delErr) {
+          console.error(`[tenant_cleanup] Failed to deactivate ${record.schemaCode}/${record.uniqueIdentifier}: ${delErr instanceof Error ? delErr.message : String(delErr)}`);
           results.mdms.failed++;
         }
       }
@@ -1032,12 +1035,13 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
             try {
               await digitApi.userUpdate({ ...user, active: false });
               results.users.deactivated++;
-            } catch {
+            } catch (userErr) {
+              console.error(`[tenant_cleanup] Failed to deactivate user ${user.userName}: ${userErr instanceof Error ? userErr.message : String(userErr)}`);
               results.users.failed++;
             }
           }
-        } catch {
-          // User search may fail if tenant has no users — that's fine
+        } catch (userSearchErr) {
+          console.error(`[tenant_cleanup] User search failed for "${tenantId}": ${userSearchErr instanceof Error ? userSearchErr.message : String(userSearchErr)}`);
         }
       }
 
@@ -1093,12 +1097,54 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
 
       const tenantId = args.tenant_id as string;
       const schemaCode = args.schema_code as string;
+      const uniqueIdentifier = args.unique_identifier as string;
 
       try {
+        // Check if a record with this identifier already exists (may be inactive)
+        const existing = await digitApi.mdmsV2SearchRaw(tenantId, schemaCode, {
+          uniqueIdentifiers: [uniqueIdentifier],
+          limit: 1,
+        });
+
+        if (existing.length > 0 && existing[0].isActive) {
+          return JSON.stringify({
+            success: true,
+            message: `Record already exists and is active: ${uniqueIdentifier}`,
+            alreadyExisted: true,
+            record: {
+              id: existing[0].id,
+              tenantId: existing[0].tenantId,
+              schemaCode: existing[0].schemaCode,
+              uniqueIdentifier: existing[0].uniqueIdentifier,
+              data: existing[0].data,
+              isActive: existing[0].isActive,
+            },
+          }, null, 2);
+        }
+
+        if (existing.length > 0 && !existing[0].isActive) {
+          // Re-activate the inactive record instead of creating (MDMS _create returns phantom 200 for inactive dupes)
+          const reactivated = await digitApi.mdmsV2Update(existing[0], true);
+          return JSON.stringify({
+            success: true,
+            message: `Reactivated inactive record: ${uniqueIdentifier}`,
+            reactivated: true,
+            record: {
+              id: reactivated.id,
+              tenantId: reactivated.tenantId,
+              schemaCode: reactivated.schemaCode,
+              uniqueIdentifier: reactivated.uniqueIdentifier,
+              data: reactivated.data,
+              isActive: reactivated.isActive,
+            },
+          }, null, 2);
+        }
+
+        // No existing record — create new
         const result = await digitApi.mdmsV2Create(
           tenantId,
           schemaCode,
-          args.unique_identifier as string,
+          uniqueIdentifier,
           args.data as Record<string, unknown>
         );
 

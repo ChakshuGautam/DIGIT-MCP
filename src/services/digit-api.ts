@@ -46,11 +46,12 @@ class DigitApiClient {
     return this.authToken !== null;
   }
 
-  getAuthInfo(): { authenticated: boolean; user: UserInfo | null; stateTenantId: string } {
+  getAuthInfo(): { authenticated: boolean; user: UserInfo | null; stateTenantId: string; token: string | null } {
     return {
       authenticated: this.isAuthenticated(),
       user: this.userInfo,
       stateTenantId: this.getEnvironmentInfo().stateTenantId,
+      token: this.authToken,
     };
   }
 
@@ -343,16 +344,18 @@ class DigitApiClient {
     hierarchyType?: string,
     options?: { limit?: number; offset?: number }
   ): Promise<Record<string, unknown>[]> {
+    const boundary: Record<string, unknown> = {
+      tenantId,
+      limit: options?.limit || 100,
+      offset: options?.offset || 0,
+    };
+    if (hierarchyType) boundary.hierarchyType = hierarchyType;
+
     const data = await this.request<{ Boundary?: Record<string, unknown>[] }>(
       this.endpoint('BOUNDARY_SEARCH'),
       {
         RequestInfo: this.buildRequestInfo(),
-        Boundary: {
-          tenantId,
-          hierarchyType,
-          limit: options?.limit || 100,
-          offset: options?.offset || 0,
-        },
+        Boundary: boundary,
       }
     );
 
@@ -434,16 +437,18 @@ class DigitApiClient {
     tenantId: string,
     hierarchyType?: string
   ): Promise<Record<string, unknown>[]> {
+    const criteria: Record<string, unknown> = {
+      tenantId,
+      limit: 100,
+      offset: 0,
+    };
+    if (hierarchyType) criteria.hierarchyType = hierarchyType;
+
     const data = await this.request<{ BoundaryHierarchy?: Record<string, unknown>[] }>(
       this.endpoint('BOUNDARY_HIERARCHY_SEARCH'),
       {
         RequestInfo: this.buildRequestInfo(),
-        BoundaryTypeHierarchySearchCriteria: {
-          tenantId,
-          hierarchyType,
-          limit: 100,
-          offset: 0,
-        },
+        BoundaryTypeHierarchySearchCriteria: criteria,
       }
     );
 
@@ -488,8 +493,10 @@ class DigitApiClient {
     const response = await fetch(url, { method: 'POST', headers, body });
     const data = await response.json() as Record<string, unknown>;
 
-    if (!response.ok) {
-      throw new Error((data.message as string) || `File upload failed: ${response.status}`);
+    if (!response.ok || (data.Errors as ApiError[] | undefined)?.length) {
+      const errors = data.Errors as ApiError[] | undefined;
+      const errorMsg = errors?.map((e) => e.message || e.code).join(', ');
+      throw new Error(errorMsg || (data.message as string) || `File upload failed: ${response.status}`);
     }
 
     return (data.files as Record<string, unknown>[]) || [];
@@ -657,16 +664,18 @@ class DigitApiClient {
     businessIds?: string[],
     options?: { limit?: number; offset?: number }
   ): Promise<Record<string, unknown>[]> {
+    const criteria: Record<string, unknown> = {
+      tenantId,
+      limit: options?.limit || 50,
+      offset: options?.offset || 0,
+    };
+    if (businessIds?.length) criteria.businessIds = businessIds;
+
     const data = await this.request<{ ProcessInstances?: Record<string, unknown>[] }>(
       this.endpoint('WORKFLOW_PROCESS_SEARCH'),
       {
         RequestInfo: this.buildRequestInfo(),
-        criteria: {
-          tenantId,
-          businessIds,
-          limit: options?.limit || 50,
-          offset: options?.offset || 0,
-        },
+        criteria,
       }
     );
 
@@ -685,7 +694,19 @@ class DigitApiClient {
     if (this.authToken) headers['Authorization'] = `Bearer ${this.authToken}`;
 
     const response = await fetch(url, { method: 'GET', headers });
+
+    // Filestore may return non-JSON for invalid IDs or errors
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      const text = await response.text();
+      throw new Error(`Filestore returned non-JSON response (${response.status}): ${text.slice(0, 200)}`);
+    }
+
     const data = await response.json() as Record<string, unknown>;
+
+    if (!response.ok) {
+      throw new Error((data.message as string) || `Filestore URL fetch failed: ${response.status}`);
+    }
 
     return (data.fileStoreIds as Record<string, unknown>[]) || [];
   }
@@ -747,55 +768,73 @@ class DigitApiClient {
     boundaryType?: string,
     hierarchyType?: string
   ): Promise<Record<string, unknown>[]> {
+    const body: Record<string, unknown> = {
+      RequestInfo: this.buildRequestInfo(),
+      tenantId,
+    };
+    if (boundaryType) body.boundaryType = boundaryType;
+    if (hierarchyType) body.hierarchyType = hierarchyType;
+
     const data = await this.request<{ TenantBoundary?: Record<string, unknown>[] }>(
       this.endpoint('LOCATION_BOUNDARY_SEARCH'),
-      {
-        RequestInfo: this.buildRequestInfo(),
-        tenantId,
-        boundaryType,
-        hierarchyType,
-      }
+      body
     );
 
     return data.TenantBoundary || [];
   }
 
   // Encryption — encrypt values (no RequestInfo needed)
+  // Note: enc-service returns a flat JSON array, not the standard {Errors, ...} envelope.
+  // We use raw fetch instead of this.request() to handle the non-standard response.
   async encryptData(
     tenantId: string,
     values: string[]
   ): Promise<string[]> {
-    const data = await this.request<string[]>(
-      this.endpoint('ENC_ENCRYPT'),
-      {
+    const url = `${this.environment.url}${this.endpoint('ENC_ENCRYPT')}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         encryptionRequests: values.map((value) => ({
           tenantId,
           type: 'Normal',
           value,
         })),
-      }
-    );
+      }),
+    });
 
-    // The response is a flat array of encrypted strings
+    if (!response.ok) {
+      throw new Error(`Encryption failed: HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
     return Array.isArray(data) ? data : [];
   }
 
   // Decryption — decrypt encrypted values (no RequestInfo needed)
+  // Same non-standard response as encrypt.
   async decryptData(
     tenantId: string,
     encryptedValues: string[]
   ): Promise<string[]> {
-    const data = await this.request<string[]>(
-      this.endpoint('ENC_DECRYPT'),
-      {
+    const url = `${this.environment.url}${this.endpoint('ENC_DECRYPT')}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         decryptionRequests: encryptedValues.map((value) => ({
           tenantId,
           type: 'Normal',
           value,
         })),
-      }
-    );
+      }),
+    });
 
+    if (!response.ok) {
+      throw new Error(`Decryption failed: HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
     return Array.isArray(data) ? data : [];
   }
 

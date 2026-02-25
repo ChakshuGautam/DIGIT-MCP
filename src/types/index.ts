@@ -94,7 +94,7 @@ export interface Environment {
   url: string;
   stateTenantId: string;
   description: string;
-  endpointOverrides?: Partial<Record<string, string>>;
+  endpointOverrides?: Record<string, string>; // Keys should match ENDPOINTS keys — validated at runtime
 }
 
 // MDMS Schema codes

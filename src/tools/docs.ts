@@ -153,8 +153,18 @@ export function registerDocsTools(registry: ToolRegistry): void {
         });
       }
 
-      // Append .md if not already present
-      const mdUrl = url.endsWith('.md') ? url : `${url}.md`;
+      // Append .md if not already present, handling query strings correctly
+      let mdUrl: string;
+      try {
+        const parsed = new URL(url);
+        if (!parsed.pathname.endsWith('.md')) {
+          parsed.pathname = `${parsed.pathname}.md`;
+        }
+        mdUrl = parsed.toString();
+      } catch {
+        // Fallback for malformed URLs — simple append
+        mdUrl = url.endsWith('.md') ? url : `${url}.md`;
+      }
 
       try {
         const response = await fetch(mdUrl);
@@ -167,10 +177,13 @@ export function registerDocsTools(registry: ToolRegistry): void {
         }
 
         const contentType = response.headers.get('content-type') || '';
-        if (!contentType.includes('text/markdown') && !contentType.includes('text/plain')) {
+        // Accept text/markdown, text/plain, text/html (gitbook sometimes returns html), and octet-stream
+        const isTextContent = contentType.includes('text/') || contentType.includes('application/octet-stream');
+        if (!isTextContent) {
           return JSON.stringify({
             success: false,
             error: `Unexpected content type: ${contentType}`,
+            hint: 'The URL may not point to a documentation page. Use docs_search to find valid URLs.',
           }, null, 2);
         }
 
