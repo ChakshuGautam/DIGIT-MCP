@@ -152,19 +152,22 @@ class DigitApiClient {
     tenantId: string,
     options?: { userName?: string; mobileNumber?: string; uuid?: string[]; roleCodes?: string[]; userType?: string; limit?: number; offset?: number }
   ): Promise<Record<string, unknown>[]> {
+    // Only include defined filters — DIGIT user-service throws 500 on certain undefined combos
+    const body: Record<string, unknown> = {
+      RequestInfo: this.buildRequestInfo(),
+      tenantId,
+      pageSize: options?.limit || 100,
+      pageNumber: options?.offset ? Math.floor(options.offset / (options.limit || 100)) : 0,
+    };
+    if (options?.userName) body.userName = options.userName;
+    if (options?.mobileNumber) body.mobileNumber = options.mobileNumber;
+    if (options?.uuid) body.uuid = options.uuid;
+    if (options?.roleCodes) body.roleCodes = options.roleCodes;
+    if (options?.userType) body.userType = options.userType;
+
     const data = await this.request<{ user?: Record<string, unknown>[] }>(
       this.endpoint('USER_SEARCH'),
-      {
-        RequestInfo: this.buildRequestInfo(),
-        tenantId,
-        userName: options?.userName,
-        mobileNumber: options?.mobileNumber,
-        uuid: options?.uuid,
-        roleCodes: options?.roleCodes,
-        userType: options?.userType,
-        pageSize: options?.limit || 100,
-        pageNumber: options?.offset ? Math.floor(options.offset / (options.limit || 100)) : 0,
-      }
+      body
     );
 
     return data.user || [];
@@ -227,15 +230,17 @@ class DigitApiClient {
     schemaCode: string,
     options?: { limit?: number; offset?: number; uniqueIdentifiers?: string[] }
   ): Promise<MdmsRecord[]> {
+    const criteria: Record<string, unknown> = {
+      tenantId,
+      limit: options?.limit || 100,
+      offset: options?.offset || 0,
+    };
+    if (schemaCode) criteria.schemaCode = schemaCode;
+    if (options?.uniqueIdentifiers) criteria.uniqueIdentifiers = options.uniqueIdentifiers;
+
     const data = await this.request<{ mdms?: MdmsRecord[] }>(this.endpoint('MDMS_SEARCH'), {
       RequestInfo: this.buildRequestInfo(),
-      MdmsCriteria: {
-        tenantId,
-        schemaCode,
-        limit: options?.limit || 100,
-        offset: options?.offset || 0,
-        uniqueIdentifiers: options?.uniqueIdentifiers,
-      },
+      MdmsCriteria: criteria,
     });
 
     return data.mdms || [];
@@ -258,6 +263,27 @@ class DigitApiClient {
           uniqueIdentifier,
           data: recordData,
           isActive: true,
+        },
+      }
+    );
+
+    return (data.mdms || [])[0] as MdmsRecord;
+  }
+
+  // MDMS v2 Update (used for soft-delete via isActive=false)
+  async mdmsV2Update(record: MdmsRecord, isActive: boolean): Promise<MdmsRecord> {
+    const data = await this.request<{ mdms?: MdmsRecord[] }>(
+      `${this.endpoint('MDMS_UPDATE')}/${record.schemaCode}`,
+      {
+        RequestInfo: this.buildRequestInfo(),
+        Mdms: {
+          tenantId: record.tenantId,
+          schemaCode: record.schemaCode,
+          uniqueIdentifier: record.uniqueIdentifier,
+          id: record.id,
+          data: record.data,
+          auditDetails: record.auditDetails,
+          isActive,
         },
       }
     );

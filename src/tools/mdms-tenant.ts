@@ -754,7 +754,9 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       // because DIGIT's user service validates role codes against MDMS.
       const essentialSchemas = [
         'ACCESSCONTROL-ROLES.roles',
-        'ACCESSCONTROL-ROLEACTIONS.roleactions',
+        // NOTE: ACCESSCONTROL-ROLEACTIONS.roleactions deliberately excluded — it has x-ref-schema
+        // dependencies on ACCESSCONTROL-ACTIONS.actions (hundreds of records). Role *codes* are
+        // enough for user provisioning; role-action mappings are shared via access-control service.
         'common-masters.IdFormat',
         'common-masters.Department',
         'common-masters.Designation',
@@ -769,23 +771,29 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
 
       for (const schemaCode of essentialSchemas) {
         try {
-          const records = await digitApi.mdmsV2SearchRaw(source, schemaCode, { limit: 500 });
-          for (const record of records) {
+          // Fetch source records and existing target records for this schema
+          const sourceRecords = await digitApi.mdmsV2SearchRaw(source, schemaCode, { limit: 500 });
+          const targetRecords = await digitApi.mdmsV2SearchRaw(target, schemaCode, { limit: 500 });
+          const targetByUid = new Map(targetRecords.map((r) => [r.uniqueIdentifier, r]));
+
+          for (const record of sourceRecords) {
+            const existing = targetByUid.get(record.uniqueIdentifier);
             try {
-              await digitApi.mdmsV2Create(
-                target,
-                schemaCode,
-                record.uniqueIdentifier,
-                record.data
-              );
-              results.data.copied.push(`${schemaCode}/${record.uniqueIdentifier}`);
+              if (existing && existing.isActive) {
+                // Already active — skip
+                results.data.skipped.push(`${schemaCode}/${record.uniqueIdentifier}`);
+              } else if (existing && !existing.isActive) {
+                // Inactive (from cleanup) — re-activate via update
+                await digitApi.mdmsV2Update(existing, true);
+                results.data.copied.push(`${schemaCode}/${record.uniqueIdentifier} (reactivated)`);
+              } else {
+                // Doesn't exist — create
+                await digitApi.mdmsV2Create(target, schemaCode, record.uniqueIdentifier, record.data);
+                results.data.copied.push(`${schemaCode}/${record.uniqueIdentifier}`);
+              }
             } catch (error) {
               const msg = error instanceof Error ? error.message : String(error);
-              if (msg.includes('DUPLICATE') || msg.includes('already exists') || msg.includes('unique') || msg.includes('NON_UNIQUE')) {
-                results.data.skipped.push(`${schemaCode}/${record.uniqueIdentifier}`);
-              } else {
-                results.data.failed.push(`${schemaCode}/${record.uniqueIdentifier}: ${msg}`);
-              }
+              results.data.failed.push(`${schemaCode}/${record.uniqueIdentifier}: ${msg}`);
             }
           }
         } catch {
@@ -917,6 +925,135 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           },
         }),
         results,
+      }, null, 2);
+    },
+  } satisfies ToolMetadata);
+
+  // tenant_cleanup — soft-delete all MDMS data and deactivate users for a tenant
+  registry.register({
+    name: 'tenant_cleanup',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'write',
+    description:
+      'Clean up a tenant by soft-deleting all MDMS data (isActive=false) and deactivating users. ' +
+      'Follows the dataloader pattern: MDMS records are deactivated via the v2 _update API, not hard-deleted. ' +
+      'Schema definitions are left in place (harmless without data). ' +
+      'Use this to tear down test tenants created by tenant_bootstrap.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID to clean up (e.g. "testroot"). WARNING: This deactivates ALL MDMS data for this tenant.',
+        },
+        deactivate_users: {
+          type: 'boolean',
+          description: 'Also deactivate users on this tenant (default: true)',
+        },
+        schemas: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional: only clean up specific schema codes. If omitted, cleans ALL schemas.',
+        },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const deactivateUsers = (args.deactivate_users as boolean) ?? true;
+      const schemaFilter = args.schemas as string[] | undefined;
+
+      const results = {
+        mdms: { deleted: 0, skipped: 0, failed: 0, schemas: {} as Record<string, number> },
+        users: { deactivated: 0, failed: 0 },
+      };
+
+      // Step 1: Search all MDMS data for the tenant
+      // Paginate through all records (MDMS search is capped at limit per call)
+      const allRecords: Array<{
+        id: string; tenantId: string; schemaCode: string;
+        uniqueIdentifier: string; data: Record<string, unknown>;
+        isActive: boolean; auditDetails?: Record<string, unknown>;
+      }> = [];
+      let offset = 0;
+      const pageSize = 500;
+
+      while (true) {
+        const schemaCode = schemaFilter && schemaFilter.length === 1 ? schemaFilter[0] : '';
+        const data = await digitApi.mdmsV2SearchRaw(tenantId, schemaCode, { limit: pageSize, offset });
+
+        if (data.length === 0) break;
+        allRecords.push(...data.map((r) => ({
+          id: r.id,
+          tenantId: r.tenantId,
+          schemaCode: r.schemaCode,
+          uniqueIdentifier: r.uniqueIdentifier,
+          data: r.data,
+          isActive: r.isActive,
+          auditDetails: r.auditDetails as Record<string, unknown> | undefined,
+        })));
+        if (data.length < pageSize) break;
+        offset += pageSize;
+      }
+
+      // Filter by schemas if multiple were specified
+      const filteredRecords = schemaFilter && schemaFilter.length > 1
+        ? allRecords.filter((r) => schemaFilter.includes(r.schemaCode))
+        : allRecords;
+
+      // Step 2: Soft-delete each active record
+      for (const record of filteredRecords) {
+        if (!record.isActive) {
+          results.mdms.skipped++;
+          continue;
+        }
+
+        try {
+          await digitApi.mdmsV2Update(
+            record as Parameters<typeof digitApi.mdmsV2Update>[0],
+            false
+          );
+          results.mdms.deleted++;
+          results.mdms.schemas[record.schemaCode] = (results.mdms.schemas[record.schemaCode] || 0) + 1;
+        } catch {
+          results.mdms.failed++;
+        }
+      }
+
+      // Step 3: Deactivate users on this tenant
+      if (deactivateUsers) {
+        try {
+          const users = await digitApi.userSearch(tenantId, { limit: 100 });
+          for (const user of users) {
+            if (!(user.active as boolean)) continue;
+            try {
+              await digitApi.userUpdate({ ...user, active: false });
+              results.users.deactivated++;
+            } catch {
+              results.users.failed++;
+            }
+          }
+        } catch {
+          // User search may fail if tenant has no users — that's fine
+        }
+      }
+
+      return JSON.stringify({
+        success: results.mdms.failed === 0 && results.users.failed === 0,
+        tenantId,
+        summary: {
+          mdms_records_found: filteredRecords.length,
+          mdms_deleted: results.mdms.deleted,
+          mdms_already_inactive: results.mdms.skipped,
+          mdms_failed: results.mdms.failed,
+          users_deactivated: results.users.deactivated,
+          users_failed: results.users.failed,
+        },
+        schemas_affected: results.mdms.schemas,
+        note: 'MDMS records soft-deleted (isActive=false). Schema definitions are left in place. Users deactivated.',
       }, null, 2);
     },
   } satisfies ToolMetadata);

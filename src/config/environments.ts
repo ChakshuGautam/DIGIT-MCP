@@ -9,6 +9,7 @@ export const ENVIRONMENTS: Record<string, Environment> = {
     endpointOverrides: {
       MDMS_SEARCH: '/mdms-v2/v2/_search',
       MDMS_CREATE: '/mdms-v2/v2/_create',
+      MDMS_UPDATE: '/mdms-v2/v2/_update',
     },
   },
 };

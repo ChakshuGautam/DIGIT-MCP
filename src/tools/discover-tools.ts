@@ -22,7 +22,7 @@ export function registerDiscoverTools(registry: ToolRegistry): void {
           message: `${summary.enabledTools} of ${summary.totalTools} tools enabled`,
           groups: summary.groups,
           usage:
-            'Call enable_tools with group names to load more tools. Groups: mdms (tenant validation + MDMS CRUD), boundary (boundary hierarchy + boundary management), masters (departments, designations, complaint types), employees (HRMS employee create/update/validate), localization (UI labels), pgr (complaints + workflow), admin (filestore upload/download + access control + user search/create), idgen (ID generation), location (geographic boundaries), encryption (encrypt/decrypt data), docs (search DIGIT documentation + full OpenAPI 3.0 API catalog), monitoring (persister health, Kafka lag, DB counts, E2E parity), tracing (distributed trace search, debug API failures, find slow operations).',
+            'Call enable_tools with group names to load more tools. Groups: mdms (tenant validation + MDMS CRUD + tenant bootstrap/cleanup), boundary (boundary hierarchy + boundary management), masters (departments, designations, complaint types), employees (HRMS employee create/update/validate), localization (UI labels), pgr (complaints + workflow), admin (filestore upload/download + access control + user search/create), idgen (ID generation), location (geographic boundaries), encryption (encrypt/decrypt data), docs (search DIGIT documentation + full OpenAPI 3.0 API catalog), monitoring (persister health, Kafka lag, DB counts, E2E parity), tracing (distributed trace search, debug API failures, find slow operations).',
         },
         null,
         2
