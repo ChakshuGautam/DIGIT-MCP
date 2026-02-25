@@ -195,28 +195,37 @@ export function registerFilestoreAclTools(registry: ToolRegistry): void {
     handler: async (args) => {
       await ensureAuthenticated();
 
-      const actions = await digitApi.accessActionsSearch(
-        args.tenant_id as string,
-        args.role_codes as string[] | undefined
-      );
+      try {
+        const actions = await digitApi.accessActionsSearch(
+          args.tenant_id as string,
+          args.role_codes as string[] | undefined
+        );
 
-      return JSON.stringify(
-        {
-          success: true,
-          tenantId: args.tenant_id,
-          roleCodes: args.role_codes || '(all)',
-          count: actions.length,
-          actions: actions.slice(0, 100).map((a) => ({
-            url: a.url,
-            displayName: a.displayName,
-            serviceName: a.serviceName,
-            enabled: a.enabled,
-          })),
-          truncated: actions.length > 100,
-        },
-        null,
-        2
-      );
+        return JSON.stringify(
+          {
+            success: true,
+            tenantId: args.tenant_id,
+            roleCodes: args.role_codes || '(all)',
+            count: actions.length,
+            actions: actions.slice(0, 100).map((a) => ({
+              url: a.url,
+              displayName: a.displayName,
+              serviceName: a.serviceName,
+              enabled: a.enabled,
+            })),
+            truncated: actions.length > 100,
+          },
+          null,
+          2
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return JSON.stringify({
+          success: false,
+          error: msg,
+          hint: 'Access control actions search failed. The ACCESSCONTROL-ACTIONS MDMS data may not be seeded for this environment.',
+        }, null, 2);
+      }
     },
   } satisfies ToolMetadata);
 }

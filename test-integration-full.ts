@@ -1177,29 +1177,20 @@ async function main() {
   });
 
   await test('8.7 access_actions_search', async () => {
-    // NOTE: This handler does NOT have internal try/catch — it throws if MDMS data is missing.
-    // We use a try/catch here to verify: either it succeeds with well-formed data, or it
-    // throws with a descriptive error (ACCESSCONTROL-ACTIONS not seeded in env).
-    // Either way, the tool is CALLED (coverage recorded by call()).
-    let r: Record<string, unknown>;
-    try {
-      r = await call('access_actions_search', {
-        tenant_id: state.tenantId,
-        role_codes: ['GRO', 'PGR_LME'],
-      });
-    } catch (err) {
-      // Handler threw — verify error is descriptive (not a crash)
-      const msg = err instanceof Error ? err.message : String(err);
-      assert(msg.length > 0, 'thrown error should have a message');
-      console.log(`        Handler threw (MDMS not seeded): ${msg.substring(0, 80)}`);
-      console.log(`        NOTE: This is a known env limitation, not a test failure`);
-      return ['access_actions_search'];
+    const r = await call('access_actions_search', {
+      tenant_id: state.tenantId,
+      role_codes: ['GRO', 'PGR_LME'],
+    });
+    assert(typeof r.success === 'boolean', `should return success boolean, got: ${typeof r.success}`);
+    if (r.success) {
+      assert(typeof r.count === 'number', `expected count as number, got: ${typeof r.count}`);
+      assert((r.count as number) >= 0, `count should be >= 0, got: ${r.count}`);
+      console.log(`        Found ${r.count} actions for GRO+PGR_LME`);
+    } else {
+      // MDMS ACCESSCONTROL-ACTIONS not seeded in this env — handler returns {success: false} with hint
+      assert(typeof r.error === 'string' && (r.error as string).length > 0, 'error should be descriptive');
+      console.log(`        MDMS not seeded: ${(r.error as string).substring(0, 80)}`);
     }
-    // If we got here, the call succeeded — verify data structure
-    assert(r.success === true, `access_actions_search should succeed, got: ${r.error}`);
-    assert(typeof r.count === 'number', `expected count as number, got: ${typeof r.count}`);
-    assert((r.count as number) >= 0, `count should be >= 0, got: ${r.count}`);
-    console.log(`        Found ${r.count} actions for GRO+PGR_LME`);
     return ['access_actions_search'];
   });
 
@@ -1458,15 +1449,15 @@ async function main() {
       target_tenant: state.testTenantRoot,
       source_tenant: 'pg',
     });
-    // tenant_bootstrap reports partial success when some schemas fail to copy
-    // (e.g. schemas with empty x-unique constraints). As long as core schemas
-    // and data were copied, we consider it a pass.
     const summary = r.summary as Record<string, number> | undefined;
     const schemasCopied = summary?.schemas_copied ?? 0;
     const dataCopied = summary?.data_copied ?? 0;
     const schemasFailed = summary?.schemas_failed ?? 0;
     if (!r.success && schemasCopied > 10 && dataCopied > 0) {
-      console.log(`        Bootstrap partial: ${schemasCopied} schemas, ${dataCopied} data records copied (${schemasFailed} schema(s) failed due to empty x-unique)`);
+      // Partial success: core schemas/data copied, but some schemas failed (empty x-unique constraints).
+      // Track as known bug — don't silently pass.
+      console.log(`        Bootstrap partial: ${schemasCopied} schemas, ${dataCopied} data records copied (${schemasFailed} schema(s) failed)`);
+      markKnownBug('15.1 tenant_bootstrap', `Partial bootstrap: ${schemasFailed} schema(s) failed due to empty x-unique constraints`);
       return ['tenant_bootstrap'];
     }
     assert(r.success === true, `tenant_bootstrap failed: ${JSON.stringify(r.error || r.summary || r)}`);
@@ -1544,25 +1535,20 @@ async function main() {
   });
 
   await test('16.2 user_search: by user_type EMPLOYEE', async () => {
-    // NOTE: user_search handler throws on server errors (no internal try/catch).
-    // The user_type filter may cause a server-side error in some DIGIT environments.
-    let r: Record<string, unknown>;
-    try {
-      r = await call('user_search', {
-        tenant_id: state.stateTenantId,
-        user_type: 'EMPLOYEE',
-        limit: 5,
-      });
-    } catch (err) {
-      // Server threw — verify error is descriptive, not a crash in our handler
-      const msg = err instanceof Error ? err.message : String(err);
-      assert(msg.length > 0, 'thrown error should have a message');
-      console.log(`        user_type filter threw (known DIGIT server issue): ${msg.substring(0, 80)}`);
-      return ['user_search'];
+    const r = await call('user_search', {
+      tenant_id: state.stateTenantId,
+      user_type: 'EMPLOYEE',
+      limit: 5,
+    });
+    assert(typeof r.success === 'boolean', `should return success boolean, got: ${typeof r.success}`);
+    if (r.success) {
+      assert((r.count as number) >= 1, 'should find at least 1 EMPLOYEE');
+      console.log(`        Found ${r.count} EMPLOYEE user(s)`);
+    } else {
+      // user_type filter not supported in some DIGIT environments
+      assert(typeof r.error === 'string' && (r.error as string).length > 0, 'error should be descriptive');
+      console.log(`        user_type filter unsupported: ${(r.error as string).substring(0, 80)}`);
     }
-    assert(r.success === true, `user_search by type failed: ${r.error}`);
-    assert((r.count as number) >= 1, 'should find at least 1 EMPLOYEE');
-    console.log(`        Found ${r.count} EMPLOYEE user(s)`);
     return ['user_search'];
   });
 
@@ -1729,10 +1715,9 @@ async function main() {
     const isHrmsBug = !r.success && ((r.error as string) || '').includes('getUser()');
     if (isHrmsBug) {
       markKnownBug('16.15 employee_update: remove_roles', 'HRMS _update NPE on Employee.getUser()');
-    } else if (r.success) {
-      console.log(`        Removed DGRO role from ${state.employeeCode}`);
     } else {
-      console.log(`        Failed (non-critical): ${(r.error as string)?.substring(0, 80)}`);
+      assert(r.success === true, `employee_update remove_roles failed (not HRMS bug): ${r.error}`);
+      console.log(`        Removed DGRO role from ${state.employeeCode}`);
     }
     return ['employee_update'];
   });
@@ -1751,10 +1736,9 @@ async function main() {
     const isHrmsBug = !r.success && ((r.error as string) || '').includes('getUser()');
     if (isHrmsBug) {
       markKnownBug('16.16 employee_update: new_assignment', 'HRMS _update NPE on Employee.getUser()');
-    } else if (r.success) {
-      console.log(`        New assignment set for ${state.employeeCode}`);
     } else {
-      console.log(`        Failed (non-critical): ${(r.error as string)?.substring(0, 80)}`);
+      assert(r.success === true, `employee_update new_assignment failed (not HRMS bug): ${r.error}`);
+      console.log(`        New assignment set for ${state.employeeCode}`);
     }
     return ['employee_update'];
   });
