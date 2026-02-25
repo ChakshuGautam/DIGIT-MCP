@@ -202,6 +202,50 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         digitApi.setStateTenant(desiredStateTenant);
       }
 
+      // ── Cross-tenant role provisioning ──
+      // If we fell back to a different tenant (e.g. logged in on "pg" but target is "tenant"),
+      // the user lacks roles for the target root. Auto-add them so that direct API login
+      // (e.g. from a frontend) also works for the target tenant.
+      let rolesProvisioned: string[] | null = null;
+      if (explicitRoot && usedLoginTenant !== explicitRoot && usedLoginTenant !== explicitTenantId) {
+        try {
+          const auth = digitApi.getAuthInfo();
+          const searchTenant = auth.user?.tenantId || usedLoginTenant;
+          const users = await digitApi.userSearch(searchTenant, { userName: username, limit: 1 });
+
+          if (users.length > 0) {
+            const user = users[0];
+            const existingRoles = (user.roles || []) as Array<{ code: string; name: string; tenantId: string }>;
+            const existingForTarget = new Set(
+              existingRoles.filter((r) => r.tenantId === explicitRoot).map((r) => r.code),
+            );
+
+            const standardRoles = ['CITIZEN', 'EMPLOYEE', 'CSR', 'GRO', 'PGR_LME', 'DGRO', 'SUPERUSER'];
+            const newRoles = standardRoles
+              .filter((code) => !existingForTarget.has(code))
+              .map((code) => ({ code, name: code, tenantId: explicitRoot }));
+
+            if (newRoles.length > 0) {
+              await digitApi.userUpdate({
+                ...user,
+                roles: [...existingRoles, ...newRoles],
+              });
+              rolesProvisioned = newRoles.map((r) => r.code);
+
+              // Re-login with the target tenant now that roles exist
+              try {
+                await digitApi.login(username, password, explicitRoot);
+                usedLoginTenant = explicitRoot;
+              } catch {
+                // Fall back — roles are added but token stays on original tenant
+              }
+            }
+          }
+        } catch {
+          // Non-fatal — login succeeded, role provisioning is best-effort
+        }
+      }
+
       const auth = digitApi.getAuthInfo();
       const envAfterLogin = digitApi.getEnvironmentInfo();
 
@@ -212,6 +256,13 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           environment: { name: envAfterLogin.name, url: envAfterLogin.url },
           stateTenantId: envAfterLogin.stateTenantId,
           loginTenantId: usedLoginTenant,
+          ...(rolesProvisioned && {
+            rolesProvisioned: {
+              tenant: explicitRoot,
+              roles: rolesProvisioned,
+              note: `Added roles for "${explicitRoot}" so direct API login with this tenant now works.`,
+            },
+          }),
           user: auth.user
             ? {
                 userName: auth.user.userName,
@@ -624,6 +675,7 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       'Bootstrap a new state-level tenant root by copying ALL schemas and essential MDMS data from an existing tenant (e.g. "pg"). ' +
       'This is REQUIRED before creating employees, PGR complaints, or any service under a new tenant root. ' +
       'Copies: all schema definitions, IdFormat records, Department records, Designation records, and StateInfo. ' +
+      'Also provisions an ADMIN user on the new tenant so that direct API login with tenantId=<new-root> works from frontends. ' +
       'Call this ONCE when you create a new tenant root (e.g. "tenant", "ke") before doing anything else under it.',
     inputSchema: {
       type: 'object' as const,
@@ -698,7 +750,11 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       }
 
       // Step 3: Copy essential MDMS data records
+      // IMPORTANT: ACCESSCONTROL-ROLES.roles MUST be copied before user provisioning (Step 4),
+      // because DIGIT's user service validates role codes against MDMS.
       const essentialSchemas = [
+        'ACCESSCONTROL-ROLES.roles',
+        'ACCESSCONTROL-ROLEACTIONS.roleactions',
         'common-masters.IdFormat',
         'common-masters.Department',
         'common-masters.Designation',
@@ -737,6 +793,101 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         }
       }
 
+      // Step 4: Provision ADMIN user on target tenant
+      // DIGIT auth scopes user lookup by tenantId — a user created under "pg" can't be found
+      // when a frontend tries tenantId=<target>. We create a matching ADMIN user on the target
+      // so that direct API login works.
+      let userProvisioned: { username: string; tenantId: string; roles: string[] } | null = null;
+      let userProvisionError: string | null = null;
+      try {
+        const auth = digitApi.getAuthInfo();
+        const currentUsername = auth.user?.userName || process.env.CRS_USERNAME || 'ADMIN';
+        const currentPassword = process.env.CRS_PASSWORD || 'eGov@123';
+
+        // Get full user details from source tenant
+        const sourceTenantForSearch = auth.user?.tenantId || source;
+        const existingUsers = await digitApi.userSearch(sourceTenantForSearch, {
+          userName: currentUsername,
+          limit: 1,
+        });
+
+        const sourceUser = existingUsers[0];
+        const userName = (sourceUser?.userName as string) || currentUsername;
+        const name = (sourceUser?.name as string) || 'Admin';
+        const mobileNumber = (sourceUser?.mobileNumber as string) || '9999999999';
+
+        // Standard roles needed for full platform operations on the new tenant
+        const standardRoles = [
+          { code: 'EMPLOYEE', name: 'Employee' },
+          { code: 'CITIZEN', name: 'Citizen' },
+          { code: 'CSR', name: 'CSR' },
+          { code: 'GRO', name: 'Grievance Routing Officer' },
+          { code: 'PGR_LME', name: 'PGR Last Mile Employee' },
+          { code: 'DGRO', name: 'Department GRO' },
+          { code: 'SUPERUSER', name: 'Super User' },
+        ].map((r) => ({ ...r, tenantId: target }));
+
+        // Check if user already exists on the target tenant
+        let alreadyExists = false;
+        try {
+          const targetUsers = await digitApi.userSearch(target, { userName: userName, limit: 1 });
+          if (targetUsers.length > 0) {
+            alreadyExists = true;
+            // User exists — ensure they have all standard roles for this target
+            const existingRoles = (targetUsers[0].roles || []) as Array<{ code: string; tenantId: string }>;
+            const existingCodes = new Set(
+              existingRoles.filter((r) => r.tenantId === target).map((r) => r.code),
+            );
+            const missingRoles = standardRoles.filter((r) => !existingCodes.has(r.code));
+            if (missingRoles.length > 0) {
+              await digitApi.userUpdate({
+                ...targetUsers[0],
+                roles: [...existingRoles, ...missingRoles],
+              });
+              userProvisioned = {
+                username: userName,
+                tenantId: target,
+                roles: missingRoles.map((r) => r.code),
+              };
+            } else {
+              userProvisioned = {
+                username: userName,
+                tenantId: target,
+                roles: [],
+              };
+            }
+          }
+        } catch {
+          // User search on target may fail if tenant not fully ready — proceed to create
+        }
+
+        if (!alreadyExists) {
+          // Create user on the target tenant
+          const newUser = {
+            name,
+            mobileNumber,
+            userName,
+            password: currentPassword,
+            type: 'EMPLOYEE',
+            active: true,
+            emailId: (sourceUser?.emailId as string) || null,
+            gender: (sourceUser?.gender as string) || null,
+            roles: standardRoles,
+            tenantId: target,
+          };
+
+          await digitApi.userCreate(newUser, target);
+          userProvisioned = {
+            username: userName,
+            tenantId: target,
+            roles: standardRoles.map((r) => r.code),
+          };
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        userProvisionError = msg;
+      }
+
       return JSON.stringify({
         success: results.schemas.failed.length === 0 && results.data.failed.length === 0,
         source,
@@ -749,6 +900,22 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           data_skipped: results.data.skipped.length,
           data_failed: results.data.failed.length,
         },
+        ...(userProvisioned && {
+          adminUser: {
+            provisioned: true,
+            ...userProvisioned,
+            note: userProvisioned.roles.length > 0
+              ? `ADMIN user "${userProvisioned.username}" provisioned on "${target}" with roles: ${userProvisioned.roles.join(', ')}. Direct login with tenantId="${target}" now works.`
+              : `ADMIN user "${userProvisioned.username}" already exists on "${target}" with all required roles.`,
+          },
+        }),
+        ...(userProvisionError && {
+          adminUser: {
+            provisioned: false,
+            error: userProvisionError,
+            hint: 'User provisioning failed. You can manually create an ADMIN user with user_create tool.',
+          },
+        }),
         results,
       }, null, 2);
     },

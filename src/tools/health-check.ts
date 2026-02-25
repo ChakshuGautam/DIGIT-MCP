@@ -187,7 +187,8 @@ export function registerHealthCheckTools(registry: ToolRegistry): void {
         const start = Date.now();
         try {
           const probeData = probe.buildProbe(tenantId);
-          let url = `${baseUrl}${ENDPOINTS[probe.endpointKey]}`;
+          const endpointPath = envInfo.endpointOverrides?.[probe.endpointKey] || ENDPOINTS[probe.endpointKey];
+          let url = `${baseUrl}${endpointPath}`;
 
           if (probeData.params) {
             url += '?' + new URLSearchParams(probeData.params).toString();
