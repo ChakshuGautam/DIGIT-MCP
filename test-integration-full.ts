@@ -1,8 +1,9 @@
 /**
- * Comprehensive integration tests for DIGIT MCP Server — 57 tools, 100% coverage.
+ * Comprehensive integration tests for DIGIT MCP Server — 57 tools, authentic coverage.
  *
  * Hits the real DIGIT API (set CRS_API_URL env var).
- * Tests are STRICT — no error swallowing. Failures expose MCP bugs to fix.
+ * Tests are STRICT — no error swallowing, no fake assertions.
+ * Known server bugs are tracked separately (not counted as authentic passes).
  *
  * Required env vars:
  *   CRS_API_URL      - DIGIT API gateway URL (e.g. https://your-digit-instance)
@@ -42,10 +43,16 @@ const ALL_TOOL_NAMES: readonly string[] = [
 /** Which tools have been called at least once during the test run. */
 const toolsCovered = new Set<string>();
 
+/** Tools that were skipped due to infra unavailability — NOT counted as covered. */
+const toolsSkipped = new Set<string>();
+
+/** Tests where KNOWN SERVER BUG was hit (tool was called but server bug masked result). */
+const knownBugTests: string[] = [];
+
 /** Per-test results. */
 interface TestResult {
   name: string;
-  status: 'pass' | 'fail' | 'skip';
+  status: 'pass' | 'fail' | 'skip' | 'known_bug';
   ms: number;
   error?: string;
   toolsCalled: string[];
@@ -185,12 +192,21 @@ async function testWithDeps(name: string, deps: string[], fn: () => Promise<stri
   await test(name, fn);
 }
 
-/** Skip a test with a reason. */
+/** Skip a test with a reason. Does NOT add tools to coverage — skipped means untested. */
 function skip(name: string, reason: string, tools: string[] = []): void {
   skipped.push(name);
-  for (const t of tools) toolsCovered.add(t);
+  for (const t of tools) toolsSkipped.add(t);
   results.push({ name, status: 'skip', ms: 0, error: reason, toolsCalled: tools });
   console.log(`  \x1b[33mSKIP\x1b[0m  ${name} \x1b[90m(${reason})\x1b[0m`);
+}
+
+/** Mark a test as hitting a known server bug. Tool WAS called, but result is untestable. */
+function markKnownBug(testName: string, description: string): void {
+  knownBugTests.push(testName);
+  // Update the result status
+  const result = results.find(r => r.name === testName);
+  if (result) result.status = 'known_bug';
+  console.log(`        \x1b[33mKNOWN SERVER BUG\x1b[0m: ${description}`);
 }
 
 function assert(condition: boolean, msg: string): void {
@@ -230,7 +246,7 @@ async function main() {
   console.log('');
   console.log('╔══════════════════════════════════════════════════════════════╗');
   console.log('║   DIGIT MCP Server — Comprehensive Integration Tests       ║');
-  console.log('║   57 tools • STRICT mode • no error swallowing             ║');
+  console.log('║   57 tools • STRICT mode • authentic coverage              ║');
   console.log('╚══════════════════════════════════════════════════════════════╝');
   console.log(`  RUN_ID: ${RUN_ID}  TEST_PREFIX: ${TEST_PREFIX}`);
   console.log('');
@@ -252,14 +268,29 @@ async function main() {
 
   await test('0.1 detect Docker availability', async () => {
     const r = await call('kafka_lag');
+    // Tool must return a well-formed result with ok field (boolean) regardless of infra
+    assert(typeof r.ok === 'boolean', `kafka_lag should return ok as boolean, got: ${typeof r.ok}`);
     hasDocker = r.ok === true;
+    if (hasDocker) {
+      // When Docker IS available, verify we get actual topic data
+      assert(r.topics !== undefined || r.groups !== undefined || r.status !== undefined,
+        'kafka_lag with Docker should return topics/groups/status data');
+    }
     console.log(`        Docker/rpk: ${hasDocker ? 'available' : 'not available'}`);
     return ['kafka_lag'];
   });
 
   await test('0.2 detect Tempo availability', async () => {
     const r = await call('tracing_health');
+    // Tool must return well-formed result with status string regardless of infra
+    assert(typeof r.status === 'string', `tracing_health should return status as string, got: ${typeof r.status}`);
     hasTempo = r.status === 'healthy';
+    if (hasTempo) {
+      // When Tempo IS available, verify we get component details
+      assert(r.components !== undefined, 'tracing_health when healthy should return components');
+      const components = r.components as Record<string, { healthy: boolean }>;
+      assert(components.tempo !== undefined, 'components should include tempo');
+    }
     console.log(`        Tempo: ${hasTempo ? 'healthy' : 'not available'}`);
     return ['tracing_health'];
   });
@@ -471,15 +502,23 @@ async function main() {
 
   await test('3.3 boundary_mgmt_search', async () => {
     const r = await call('boundary_mgmt_search', { tenant_id: state.tenantId });
-    assert(r.success !== undefined, 'boundary_mgmt_search should return a result');
+    // Tool must return success boolean and resources array (possibly empty)
+    assert(typeof r.success === 'boolean', `boundary_mgmt_search should return success as boolean, got: ${typeof r.success}`);
+    if (r.success) {
+      assert(typeof r.count === 'number', `expected count as number, got: ${typeof r.count}`);
+    }
     console.log(`        Result: success=${r.success}, count=${r.count ?? 'n/a'}`);
     return ['boundary_mgmt_search'];
   });
 
   await test('3.4 boundary_mgmt_download', async () => {
     const r = await call('boundary_mgmt_download', { tenant_id: state.tenantId });
-    assert(r.success !== undefined, 'boundary_mgmt_download should return a result');
-    console.log(`        Result: success=${r.success}`);
+    // Tool must return success boolean
+    assert(typeof r.success === 'boolean', `boundary_mgmt_download should return success as boolean, got: ${typeof r.success}`);
+    if (r.success) {
+      assert(typeof r.count === 'number', `expected count as number, got: ${typeof r.count}`);
+    }
+    console.log(`        Result: success=${r.success}, count=${r.count ?? 'n/a'}`);
     return ['boundary_mgmt_download'];
   });
 
@@ -506,51 +545,61 @@ async function main() {
   });
 
   await test('3.6 boundary_mgmt_process: upload + process boundary data', async () => {
-    // Upload a minimal file then call boundary_mgmt_process. The server may reject the file
-    // format (it expects real Excel), but this exercises the tool's API call path.
-    const csvContent = 'Boundary Code,Boundary Type,Parent Boundary Code\nTEST_WARD,Ward,';
-    const base64 = Buffer.from(csvContent).toString('base64');
+    // Upload a minimal text file and call boundary_mgmt_process.
+    // The server will reject non-Excel files, but we verify the tool handles this correctly.
+    const content = Buffer.from(`boundary test ${TEST_PREFIX}`).toString('base64');
     const uploadResult = await call('filestore_upload', {
       tenant_id: state.stateTenantId,
       module: 'boundary',
-      file_name: `${TEST_PREFIX}_boundary.xlsx`,
-      file_content_base64: base64,
-      content_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      file_name: `${TEST_PREFIX}_boundary.txt`,
+      file_content_base64: content,
+      content_type: 'text/plain',
     });
-    const fileStoreId = (uploadResult.files as Array<{ fileStoreId: string }>)?.[0]?.fileStoreId;
-    if (!fileStoreId) {
-      console.log(`        Filestore upload returned no ID — exercising tool with dummy ID`);
-    }
+    assert(uploadResult.success === true, `filestore_upload failed: ${uploadResult.error}`);
+    const files = uploadResult.files as Array<{ fileStoreId: string }> | undefined;
+    const fileStoreId = files?.[0]?.fileStoreId;
+    assert(fileStoreId, `filestore_upload should return fileStoreId, got files: ${JSON.stringify(files)}`);
+
     const r = await call('boundary_mgmt_process', {
       tenant_id: state.tenantId,
       resource_details: {
         tenantId: state.tenantId,
         type: 'boundary',
         hierarchyType: 'ADMIN',
-        fileStoreId: fileStoreId || 'dummy-filestoreid',
+        fileStoreId,
         action: 'create',
       },
     });
-    // Tool is exercised regardless of whether the server accepts the file format
-    console.log(`        Result: success=${r.success}`);
-    if (!r.success) console.log(`        (Expected: server may reject non-Excel file)`);
+    // Tool must return a well-formed response with success boolean
+    assert(typeof r.success === 'boolean', `boundary_mgmt_process should return success boolean, got: ${typeof r.success}`);
+    // With a non-Excel file, server should reject — verify error is propagated
+    if (!r.success) {
+      assert(typeof r.error === 'string' && r.error.length > 0,
+        'boundary_mgmt_process failure should include error message');
+      console.log(`        Correctly rejected invalid file: ${(r.error as string).substring(0, 80)}`);
+    } else {
+      console.log(`        Accepted: success=${r.success}`);
+    }
     return ['boundary_mgmt_process'];
   });
 
   await test('3.7 boundary_mgmt_generate: generate boundary codes', async () => {
-    try {
-      const r = await call('boundary_mgmt_generate', {
-        tenant_id: state.tenantId,
-        resource_details: {
-          tenantId: state.tenantId,
-          type: 'boundary',
-          hierarchyType: 'ADMIN',
-        },
-      });
-      console.log(`        Result: success=${r.success}`);
-    } catch (err) {
-      // Tool exercised even if server returns error (no prior boundary_mgmt_process data)
-      console.log(`        Tool exercised (${(err as Error).message?.substring(0, 80)})`);
+    const r = await call('boundary_mgmt_generate', {
+      tenant_id: state.tenantId,
+      resource_details: {
+        tenantId: state.tenantId,
+        type: 'boundary',
+        hierarchyType: 'ADMIN',
+      },
+    });
+    // Tool must return a well-formed response regardless of server state
+    assert(typeof r.success === 'boolean', `boundary_mgmt_generate should return success boolean, got: ${typeof r.success}`);
+    if (r.success) {
+      console.log(`        Generated boundary codes: count=${r.count ?? 'n/a'}`);
+    } else {
+      // Expected: no prior boundary_mgmt_process data → server returns error
+      assert(typeof r.error === 'string', 'failure should include error message');
+      console.log(`        Expected failure (no prior processed data): ${(r.error as string).substring(0, 80)}`);
     }
     return ['boundary_mgmt_generate'];
   });
@@ -648,13 +697,12 @@ async function main() {
     // KNOWN DIGIT HRMS SERVER BUG: The _update endpoint internally re-fetches the Employee
     // from DB where getUser() returns null, causing NPE on getMobileNumber(). This is a
     // server-side deserialization bug — the MCP handler correctly populates the user object
-    // in the request, but HRMS ignores it and uses its own internal fetch. Tracked upstream.
+    // in the request, but HRMS ignores it and uses its own internal fetch. See issue #1.
     const isHrmsUpdateBug = !r.success && ((r.error as string) || '').includes('getUser()');
-    assert(r.success === true || isHrmsUpdateBug,
-      `employee_update add role failed: ${r.error}`);
     if (isHrmsUpdateBug) {
-      console.log(`        KNOWN HRMS SERVER BUG: _update NPE on Employee.getUser()`);
+      markKnownBug('5.4 employee_update: add role', 'HRMS _update NPE on Employee.getUser() — server-side bug');
     } else {
+      assert(r.success === true, `employee_update add role failed: ${r.error}`);
       console.log(`        Added SUPERUSER role to ${state.employeeCode}`);
     }
     return ['employee_update'];
@@ -667,11 +715,10 @@ async function main() {
       deactivate: true,
     });
     const isHrmsUpdateBug = !r.success && ((r.error as string) || '').includes('getUser()');
-    assert(r.success === true || isHrmsUpdateBug,
-      `employee_update deactivate failed: ${r.error}`);
     if (isHrmsUpdateBug) {
-      console.log(`        KNOWN HRMS SERVER BUG: _update NPE on Employee.getUser()`);
+      markKnownBug('5.5 employee_update: deactivate', 'HRMS _update NPE on Employee.getUser() — server-side bug');
     } else {
+      assert(r.success === true, `employee_update deactivate failed: ${r.error}`);
       console.log(`        Deactivated ${state.employeeCode}`);
     }
     return ['employee_update'];
@@ -685,11 +732,10 @@ async function main() {
       reactivate: true,
     });
     const isHrmsUpdateBug = !r.success && ((r.error as string) || '').includes('getUser()');
-    assert(r.success === true || isHrmsUpdateBug,
-      `employee_update reactivate failed: ${r.error}`);
     if (isHrmsUpdateBug) {
-      console.log(`        KNOWN HRMS SERVER BUG: _update NPE on Employee.getUser()`);
+      markKnownBug('5.6 employee_update: reactivate', 'HRMS _update NPE on Employee.getUser() — server-side bug');
     } else {
+      assert(r.success === true, `employee_update reactivate failed: ${r.error}`);
       console.log(`        Reactivated ${state.employeeCode}`);
     }
     return ['employee_update'];
@@ -1131,27 +1177,21 @@ async function main() {
   });
 
   await test('8.7 access_actions_search', async () => {
-    // ACCESSCONTROL-ACTIONS MDMS data may not be seeded in all environments.
-    // The handler throws (no internal try/catch) if MDMS data is missing,
-    // so we wrap in try/catch to handle gracefully while still covering the tool.
-    try {
-      const r = await call('access_actions_search', {
-        tenant_id: state.tenantId,
-        role_codes: ['GRO', 'PGR_LME'],
-      });
-      if (!r.success) {
-        console.log(`        KNOWN ENV ISSUE: access_actions_search returned error`);
-        return ['access_actions_search'];
-      }
+    const r = await call('access_actions_search', {
+      tenant_id: state.tenantId,
+      role_codes: ['GRO', 'PGR_LME'],
+    });
+    assert(typeof r.success === 'boolean', `should return success boolean, got: ${typeof r.success}`);
+    if (r.success) {
+      assert(typeof r.count === 'number', `expected count as number, got: ${typeof r.count}`);
+      assert((r.count as number) >= 0, `count should be >= 0, got: ${r.count}`);
       console.log(`        Found ${r.count} actions for GRO+PGR_LME`);
-      return ['access_actions_search'];
-    } catch (err) {
-      // Handler throws if ACCESSCONTROL-ACTIONS data not in MDMS.
-      // Tool is still exercised (covered) since call() registered it.
-      const msg = err instanceof Error ? err.message : String(err);
-      console.log(`        KNOWN ENV ISSUE: ${msg.slice(0, 100)}`);
-      return ['access_actions_search'];
+    } else {
+      // MDMS ACCESSCONTROL-ACTIONS not seeded in this env — handler returns {success: false} with hint
+      assert(typeof r.error === 'string' && (r.error as string).length > 0, 'error should be descriptive');
+      console.log(`        MDMS not seeded: ${(r.error as string).substring(0, 80)}`);
     }
+    return ['access_actions_search'];
   });
 
   // ──────────────────────────────────────────────────────────────────
@@ -1187,8 +1227,18 @@ async function main() {
 
   await test('10.1 location_search', async () => {
     const r = await call('location_search', { tenant_id: state.tenantId });
-    assert(r.success !== undefined, 'location_search should return a result');
-    console.log(`        Result: success=${r.success}`);
+    // Tool must return success boolean, not just "something truthy"
+    assert(typeof r.success === 'boolean', `location_search should return success as boolean, got: ${typeof r.success}`);
+    if (r.success) {
+      // When successful, should have boundaries or empty result with count
+      assert(r.count !== undefined || r.boundaries !== undefined,
+        'location_search success should include count or boundaries');
+      console.log(`        Found ${r.count ?? 0} location(s)`);
+    } else {
+      // Service may not be available — but error should be informative
+      assert(typeof r.error === 'string', 'location_search failure should include error message');
+      console.log(`        Service unavailable: ${(r.error as string).substring(0, 80)}`);
+    }
     return ['location_search'];
   });
 
@@ -1292,23 +1342,40 @@ async function main() {
 
   await test('13.1 kafka_lag', async () => {
     const r = await call('kafka_lag');
-    // Tool should always return a result, even when Docker is unavailable
-    assert(r.ok !== undefined, 'kafka_lag should return ok field');
+    // Must return ok as boolean — never undefined
+    assert(typeof r.ok === 'boolean', `kafka_lag should return ok as boolean, got: ${typeof r.ok}`);
+    if (r.ok) {
+      // With Docker available: verify data structure
+      assert(typeof r.status === 'string', 'kafka_lag ok=true should include status string');
+    } else {
+      // Without Docker: should explain why
+      assert(typeof r.error === 'string' || typeof r.status === 'string',
+        'kafka_lag ok=false should include error or status');
+    }
     console.log(`        Status: ${r.status ?? 'n/a'}, ok=${r.ok}`);
     return ['kafka_lag'];
   });
 
   await test('13.2 persister_errors', async () => {
     const r = await call('persister_errors', { since: '5m' });
-    assert(r.ok !== undefined || r.success !== undefined, 'persister_errors should return a result');
-    console.log(`        Status: ${r.status ?? 'n/a'}`);
+    // Must return ok as boolean (monitoring tools use ok, not success)
+    assert(typeof r.ok === 'boolean', `persister_errors should return ok as boolean, got: ${typeof r.ok}`);
+    if (r.ok) {
+      assert(typeof r.totalErrors === 'number' || typeof r.categories === 'object',
+        'persister_errors ok=true should include error counts or categories');
+    }
+    console.log(`        Status: ok=${r.ok}, totalErrors=${r.totalErrors ?? 'n/a'}`);
     return ['persister_errors'];
   });
 
   await test('13.3 db_counts', async () => {
     const r = await call('db_counts');
-    assert(r.ok !== undefined || r.success !== undefined, 'db_counts should return a result');
-    console.log(`        Status: ${r.status ?? 'n/a'}`);
+    assert(typeof r.ok === 'boolean', `db_counts should return ok as boolean, got: ${typeof r.ok}`);
+    if (r.ok) {
+      assert(typeof r.tables === 'object' || typeof r.counts === 'object',
+        'db_counts ok=true should include tables or counts data');
+    }
+    console.log(`        Status: ok=${r.ok}`);
     return ['db_counts'];
   });
 
@@ -1317,8 +1384,13 @@ async function main() {
       tenant_id: state.tenantId,
       since: '5m',
     });
-    assert(r.success !== undefined || r.overallStatus !== undefined, 'persister_monitor should return a result');
-    console.log(`        Overall: ${r.overallStatus ?? 'n/a'}, Alerts: ${r.alertCount ?? 'n/a'}`);
+    // Composite tool: returns overallStatus + per-probe results
+    assert(typeof r.overallStatus === 'string',
+      `persister_monitor should return overallStatus as string, got: ${typeof r.overallStatus}`);
+    assert(typeof r.alertCount === 'number',
+      `persister_monitor should return alertCount as number, got: ${typeof r.alertCount}`);
+    assert(r.alertCount >= 0, `alertCount should be >= 0, got: ${r.alertCount}`);
+    console.log(`        Overall: ${r.overallStatus}, Alerts: ${r.alertCount}`);
     return ['persister_monitor'];
   });
 
@@ -1377,15 +1449,15 @@ async function main() {
       target_tenant: state.testTenantRoot,
       source_tenant: 'pg',
     });
-    // tenant_bootstrap reports partial success when some schemas fail to copy
-    // (e.g. schemas with empty x-unique constraints). As long as core schemas
-    // and data were copied, we consider it a pass.
     const summary = r.summary as Record<string, number> | undefined;
     const schemasCopied = summary?.schemas_copied ?? 0;
     const dataCopied = summary?.data_copied ?? 0;
     const schemasFailed = summary?.schemas_failed ?? 0;
     if (!r.success && schemasCopied > 10 && dataCopied > 0) {
-      console.log(`        Bootstrap partial: ${schemasCopied} schemas, ${dataCopied} data records copied (${schemasFailed} schema(s) failed due to empty x-unique)`);
+      // Partial success: core schemas/data copied, but some schemas failed (empty x-unique constraints).
+      // Track as known bug — don't silently pass.
+      console.log(`        Bootstrap partial: ${schemasCopied} schemas, ${dataCopied} data records copied (${schemasFailed} schema(s) failed)`);
+      markKnownBug('15.1 tenant_bootstrap', `Partial bootstrap: ${schemasFailed} schema(s) failed due to empty x-unique constraints`);
       return ['tenant_bootstrap'];
     }
     assert(r.success === true, `tenant_bootstrap failed: ${JSON.stringify(r.error || r.summary || r)}`);
@@ -1447,51 +1519,540 @@ async function main() {
   });
 
   // ──────────────────────────────────────────────────────────────────
-  // Section 16: Cleanup test data on pg
+  // Section 16: Parameter Coverage (untested tool parameters)
   // ──────────────────────────────────────────────────────────────────
-  console.log('\n── Section 16: Cleanup ──');
+  console.log('\n── Section 16: Parameter Coverage ──');
 
-  await test('16.1 cleanup: soft-delete test MDMS record', async () => {
-    try {
-      const records = await digitApi.mdmsV2SearchRaw(
-        state.stateTenantId,
-        state.mdmsRecordSchemaCode,
-        { uniqueIdentifiers: [state.mdmsRecordUniqueId], limit: 1 },
-      );
-      if (records.length > 0 && records[0].isActive) {
-        await digitApi.mdmsV2Update(records[0], false);
-        console.log(`        Deactivated test MDMS record: ${state.mdmsRecordUniqueId}`);
-      } else if (records.length > 0) {
-        console.log(`        Test MDMS record already inactive (OK)`);
-      } else {
-        console.log(`        Test MDMS record not found (OK)`);
+  await test('16.1 user_search: by mobile_number', async () => {
+    const r = await call('user_search', {
+      tenant_id: state.stateTenantId,
+      mobile_number: state.testUserMobile,
+    });
+    assert(typeof r.success === 'boolean', `user_search should return success boolean, got: ${typeof r.success}`);
+    assert(r.success === true, `user_search by mobile failed: ${r.error}`);
+    console.log(`        Found ${r.count} user(s) with mobile ${state.testUserMobile}`);
+    return ['user_search'];
+  });
+
+  await test('16.2 user_search: by user_type EMPLOYEE', async () => {
+    const r = await call('user_search', {
+      tenant_id: state.stateTenantId,
+      user_type: 'EMPLOYEE',
+      limit: 5,
+    });
+    assert(typeof r.success === 'boolean', `should return success boolean, got: ${typeof r.success}`);
+    if (r.success) {
+      assert((r.count as number) >= 1, 'should find at least 1 EMPLOYEE');
+      console.log(`        Found ${r.count} EMPLOYEE user(s)`);
+    } else {
+      // user_type filter not supported in some DIGIT environments
+      assert(typeof r.error === 'string' && (r.error as string).length > 0, 'error should be descriptive');
+      console.log(`        user_type filter unsupported: ${(r.error as string).substring(0, 80)}`);
+    }
+    return ['user_search'];
+  });
+
+  await test('16.3 user_search: by role_codes', async () => {
+    const r = await call('user_search', {
+      tenant_id: state.stateTenantId,
+      role_codes: ['GRO'],
+      limit: 5,
+    });
+    assert(r.success === true, `user_search by role failed: ${r.error}`);
+    console.log(`        Found ${r.count} user(s) with GRO role`);
+    return ['user_search'];
+  });
+
+  await testWithDeps('16.4 user_search: by uuid', ['8.2 user_create'], async () => {
+    if (!state.testUserUuid) {
+      console.log(`        No test user UUID available, skipping`);
+      return ['user_search'];
+    }
+    const r = await call('user_search', {
+      tenant_id: state.stateTenantId,
+      uuid: [state.testUserUuid],
+    });
+    assert(r.success === true, `user_search by uuid failed: ${r.error}`);
+    assert((r.count as number) >= 1, `should find user by UUID ${state.testUserUuid}`);
+    console.log(`        Found user by UUID: ${state.testUserUuid}`);
+    return ['user_search'];
+  });
+
+  await test('16.5 configure: state_tenant override', async () => {
+    // Test the state_tenant parameter by setting it, verifying it applies
+    const r = await call('get_environment_info', { state_tenant: state.stateTenantId });
+    assert(r.success === true, `get_environment_info with state_tenant failed: ${r.error}`);
+    const cur = r.current as Record<string, unknown>;
+    // Response uses 'stateTenantId' (not 'state_tenant')
+    assert(cur.stateTenantId === state.stateTenantId,
+      `expected stateTenantId ${state.stateTenantId}, got: ${cur.stateTenantId}`);
+    console.log(`        state_tenant override confirmed: ${cur.stateTenantId}`);
+    return ['get_environment_info'];
+  });
+
+  await test('16.6 mdms_search: with pagination (limit + offset)', async () => {
+    // First search with limit=2 to get a subset
+    const r1 = await call('mdms_search', {
+      tenant_id: state.stateTenantId,
+      schema_code: 'common-masters.Department',
+      limit: 2,
+      offset: 0,
+    });
+    assert(r1.success === true, `mdms_search with limit failed: ${r1.error}`);
+    const firstBatchCount = (r1.records as unknown[])?.length ?? 0;
+    assert(firstBatchCount <= 2, `limit=2 but got ${firstBatchCount} records`);
+
+    // Then search with offset=1 to verify pagination shifts
+    const r2 = await call('mdms_search', {
+      tenant_id: state.stateTenantId,
+      schema_code: 'common-masters.Department',
+      limit: 2,
+      offset: 1,
+    });
+    assert(r2.success === true, `mdms_search with offset failed: ${r2.error}`);
+    console.log(`        Pagination: limit=2 offset=0 → ${firstBatchCount} records, offset=1 → ${(r2.records as unknown[])?.length ?? 0} records`);
+    return ['mdms_search'];
+  });
+
+  await test('16.7 boundary_hierarchy_search: with hierarchy_type filter', async () => {
+    const r = await call('boundary_hierarchy_search', {
+      tenant_id: state.tenantId,
+      hierarchy_type: 'ADMIN',
+    });
+    assert(r.success === true, `boundary_hierarchy_search with filter failed: ${r.error}`);
+    assert((r.count as number) >= 1, 'should find ADMIN hierarchy');
+    console.log(`        Found ${r.count} ADMIN hierarchy(s)`);
+    return ['boundary_hierarchy_search'];
+  });
+
+  await test('16.8 validate_designations: with required check', async () => {
+    const r = await call('validate_designations', {
+      tenant_id: state.tenantId,
+      required_designations: ['DESIG_1'],
+    });
+    assert(r.success === true, `validate_designations with required failed: ${r.error}`);
+    const v = r.validation as Record<string, unknown>;
+    console.log(`        ${v.summary}`);
+    return ['validate_designations'];
+  });
+
+  await test('16.9 pgr_search: with offset pagination', async () => {
+    const r = await call('pgr_search', {
+      tenant_id: state.tenantId,
+      limit: 2,
+      offset: 0,
+    });
+    assert(r.success === true, `pgr_search with pagination failed: ${r.error}`);
+    console.log(`        Found ${r.count} complaints (limit=2, offset=0)`);
+    return ['pgr_search'];
+  });
+
+  await test('16.10 idgen_generate: with custom id_format', async () => {
+    const r = await call('idgen_generate', {
+      tenant_id: state.stateTenantId,
+      id_name: 'pgr.servicerequestid',
+      id_format: `PG-PGR-[cy:yyyy-MM-dd]-[SEQ_INTTEST_${RUN_ID}]`,
+    });
+    assert(r.success === true, `idgen_generate with custom format failed: ${r.error}`);
+    const ids = r.ids as string[];
+    assert(ids?.length === 1, `expected 1 ID, got: ${ids?.length}`);
+    assert(ids[0].startsWith('PG-PGR-'), `expected ID starting with PG-PGR-, got: ${ids[0]}`);
+    console.log(`        Custom format ID: ${ids[0]}`);
+    return ['idgen_generate'];
+  });
+
+  await test('16.11 api_catalog: nonexistent service (summary)', async () => {
+    const r = await call('api_catalog', { service: 'NONEXISTENT_SERVICE_XYZ', format: 'summary' });
+    assert(r.success === false, 'api_catalog with nonexistent service in summary mode should fail');
+    assert(typeof r.error === 'string' && (r.error as string).includes('NONEXISTENT_SERVICE_XYZ'),
+      'error should mention the service name');
+    assert(Array.isArray(r.availableServices), 'should list available services');
+    console.log(`        Correctly rejected: ${(r.error as string).substring(0, 80)}`);
+    return ['api_catalog'];
+  });
+
+  await test('16.12 api_catalog: nonexistent service (openapi)', async () => {
+    const r = await call('api_catalog', { service: 'NONEXISTENT_SERVICE_XYZ', format: 'openapi' });
+    assert(r.success === false, 'api_catalog with nonexistent service in openapi mode should fail');
+    assert(Array.isArray(r.availableServices), 'should list available services');
+    console.log(`        Correctly rejected: ${(r.error as string).substring(0, 80)}`);
+    return ['api_catalog'];
+  });
+
+  await test('16.13 api_catalog: full openapi (no service filter)', async () => {
+    const r = await call('api_catalog', { format: 'openapi' });
+    assert(r.success === true, `api_catalog full openapi failed: ${r.error}`);
+    assert(r.format === 'openapi', 'format should be openapi');
+    const spec = r.spec as Record<string, unknown>;
+    assert(spec.openapi !== undefined || spec.paths !== undefined, 'spec should have openapi or paths');
+    console.log(`        Full OpenAPI spec returned`);
+    return ['api_catalog'];
+  });
+
+  await test('16.14 employee_update: not found', async () => {
+    const r = await call('employee_update', {
+      tenant_id: state.employeeTenantId,
+      employee_code: 'NONEXISTENT_EMP_XYZ_999',
+    });
+    assert(r.success === false, 'employee_update with nonexistent code should fail');
+    assert(typeof r.error === 'string' && (r.error as string).includes('not found'),
+      `error should mention not found, got: ${r.error}`);
+    console.log(`        Correctly rejected: ${(r.error as string).substring(0, 80)}`);
+    return ['employee_update'];
+  });
+
+  await testWithDeps('16.15 employee_update: remove_roles', ['5.3 employee_create'], async () => {
+    if (!state.employeeCode) {
+      console.log('        No test employee, skipping');
+      return ['employee_update'];
+    }
+    const r = await call('employee_update', {
+      tenant_id: state.employeeTenantId,
+      employee_code: state.employeeCode,
+      remove_roles: ['DGRO'],
+    });
+    assert(typeof r.success === 'boolean', `employee_update should return success boolean, got: ${typeof r.success}`);
+    const isHrmsBug = !r.success && ((r.error as string) || '').includes('getUser()');
+    if (isHrmsBug) {
+      markKnownBug('16.15 employee_update: remove_roles', 'HRMS _update NPE on Employee.getUser()');
+    } else {
+      assert(r.success === true, `employee_update remove_roles failed (not HRMS bug): ${r.error}`);
+      console.log(`        Removed DGRO role from ${state.employeeCode}`);
+    }
+    return ['employee_update'];
+  });
+
+  await testWithDeps('16.16 employee_update: new_assignment', ['5.3 employee_create'], async () => {
+    if (!state.employeeCode) {
+      console.log('        No test employee, skipping');
+      return ['employee_update'];
+    }
+    const r = await call('employee_update', {
+      tenant_id: state.employeeTenantId,
+      employee_code: state.employeeCode,
+      new_assignment: { department: 'DEPT_1', designation: 'DESIG_2' },
+    });
+    assert(typeof r.success === 'boolean', `employee_update should return success boolean, got: ${typeof r.success}`);
+    const isHrmsBug = !r.success && ((r.error as string) || '').includes('getUser()');
+    if (isHrmsBug) {
+      markKnownBug('16.16 employee_update: new_assignment', 'HRMS _update NPE on Employee.getUser()');
+    } else {
+      assert(r.success === true, `employee_update new_assignment failed (not HRMS bug): ${r.error}`);
+      console.log(`        New assignment set for ${state.employeeCode}`);
+    }
+    return ['employee_update'];
+  });
+
+  await test('16.17 user_role_add: nonexistent user', async () => {
+    const r = await call('user_role_add', {
+      tenant_id: state.stateTenantId,
+      username: 'NONEXISTENT_USER_XYZ_999',
+    });
+    assert(r.success === false, 'user_role_add for nonexistent user should fail');
+    assert(typeof r.error === 'string' && (r.error as string).includes('not found'),
+      `error should mention not found, got: ${r.error}`);
+    console.log(`        Correctly rejected: ${(r.error as string).substring(0, 80)}`);
+    return ['user_role_add'];
+  });
+
+  await test('16.18 workflow_business_services: nonexistent filter', async () => {
+    const r = await call('workflow_business_services', {
+      tenant_id: state.stateTenantId,
+      business_services: ['NONEXISTENT_BIZ_SVC_XYZ'],
+    });
+    assert(r.success === true, `workflow_business_services should succeed even with no results: ${r.error}`);
+    assert((r.count as number) === 0, `expected 0 results, got: ${r.count}`);
+    assert(typeof r.hint === 'string', 'should return a hint for empty results');
+    console.log(`        Empty result with hint: ${(r.hint as string).substring(0, 80)}`);
+    return ['workflow_business_services'];
+  });
+
+  await test('16.19 docs_get: root URL', async () => {
+    const r = await call('docs_get', { url: 'https://docs.digit.org/' });
+    // Root URL may succeed or fail — both are valid. We're testing the URL parse fallback path.
+    assert(typeof r.success === 'boolean', `docs_get should return success boolean, got: ${typeof r.success}`);
+    console.log(`        Root URL result: success=${r.success}`);
+    return ['docs_get'];
+  });
+
+  await test('16.20 docs_search: whitespace-only query', async () => {
+    const r = await call('docs_search', { query: '   ' });
+    assert(r.success === false, 'docs_search with whitespace-only query should fail');
+    assert(typeof r.error === 'string', 'should return an error message');
+    console.log(`        Correctly rejected whitespace query: ${r.error}`);
+    return ['docs_search'];
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // Section 17: Error Path Tests
+  // ──────────────────────────────────────────────────────────────────
+  console.log('\n── Section 17: Error Path Tests ──');
+
+  await test('17.1 pgr_create: invalid service_code', async () => {
+    const r = await call('pgr_create', {
+      tenant_id: state.complaintTenantId,
+      service_code: 'NONEXISTENT_SERVICE_TYPE_XYZ',
+      description: 'This should fail',
+      address: { locality: { code: state.localityCode || 'SUN04' } },
+      citizen_name: 'Error Test',
+      citizen_mobile: `74${String(RUN_ID).padStart(8, '0')}`,
+    });
+    assert(r.success === false, 'pgr_create with invalid service_code should fail');
+    assert(typeof r.error === 'string' && r.error.length > 0,
+      'pgr_create failure should include error message');
+    console.log(`        Correctly rejected: ${(r.error as string).substring(0, 80)}`);
+    return ['pgr_create'];
+  });
+
+  await test('17.2 validate_tenant: empty string', async () => {
+    const r = await call('validate_tenant', { tenant_id: '' });
+    assert(r.valid === false, 'empty tenant should be invalid');
+    return ['validate_tenant'];
+  });
+
+  await test('17.3 validate_departments: with missing required', async () => {
+    const r = await call('validate_departments', {
+      tenant_id: state.tenantId,
+      required_departments: ['NONEXISTENT_DEPT_XYZ_999'],
+    });
+    // Should succeed as a validation tool but report errors for the missing dept
+    assert(r.success === true, `validate_departments should succeed as validation, got: ${r.error}`);
+    const v = r.validation as Record<string, unknown>;
+    // Missing departments are reported in validation.errors with code 'DEPARTMENT_MISSING'
+    const errors = v.errors as Array<{ code: string; value: string }> | undefined;
+    const hasMissingError = errors?.some(
+      e => e.code === 'DEPARTMENT_MISSING' && e.value === 'NONEXISTENT_DEPT_XYZ_999'
+    );
+    assert(hasMissingError === true,
+      `should report NONEXISTENT_DEPT_XYZ_999 as DEPARTMENT_MISSING in errors, got: ${JSON.stringify(errors)}`);
+    console.log(`        Correctly reported missing: ${errors?.map(e => e.value).join(', ')}`);
+    return ['validate_departments'];
+  });
+
+  await test('17.4 validate_complaint_types: check department refs', async () => {
+    const r = await call('validate_complaint_types', {
+      tenant_id: state.tenantId,
+      check_department_refs: true,
+    });
+    assert(r.success === true, `validate_complaint_types with dept check failed: ${r.error}`);
+    const v = r.validation as Record<string, unknown>;
+    console.log(`        ${v.summary}`);
+    return ['validate_complaint_types'];
+  });
+
+  await test('17.5 encrypt_data: multiple values', async () => {
+    const values = [`secret1_${RUN_ID}`, `secret2_${RUN_ID}`, `secret3_${RUN_ID}`];
+    const r = await call('encrypt_data', {
+      tenant_id: state.stateTenantId,
+      values,
+    });
+    assert(r.success === true, `encrypt_data multi failed: ${r.error}`);
+    assert((r.count as number) === 3, `expected 3 encrypted values, got: ${r.count}`);
+    const encrypted = r.encrypted as string[];
+    // Each input should produce a unique encrypted output
+    const uniqueOutputs = new Set(encrypted);
+    assert(uniqueOutputs.size === 3, 'each input should produce unique encrypted output');
+    console.log(`        Encrypted 3 values: all unique`);
+    return ['encrypt_data'];
+  });
+
+  await test('17.6 docs_search: empty query', async () => {
+    const r = await call('docs_search', { query: '' });
+    // Should either succeed with results or fail gracefully
+    assert(typeof r.success === 'boolean', `docs_search should return success boolean, got: ${typeof r.success}`);
+    console.log(`        Empty query result: success=${r.success}, count=${r.count ?? 'n/a'}`);
+    return ['docs_search'];
+  });
+
+  await test('17.7 user_role_add: with explicit username', async () => {
+    const r = await call('user_role_add', {
+      tenant_id: state.stateTenantId,
+      username: state.testUserMobile,
+      role_codes: ['CITIZEN'],
+    });
+    assert(typeof r.success === 'boolean', `user_role_add should return success boolean, got: ${typeof r.success}`);
+    if (r.success) {
+      console.log(`        Added CITIZEN role to user ${state.testUserMobile}`);
+    } else {
+      console.log(`        Failed (user may not exist): ${(r.error as string)?.substring(0, 80)}`);
+    }
+    return ['user_role_add'];
+  });
+
+  await testWithDeps('17.8 employee_create: duplicate mobile', ['5.3 employee_create'], async () => {
+    if (!state.employeeCode) {
+      console.log('        No test employee was created, skipping duplicate test');
+      return ['employee_create'];
+    }
+    // Re-use the same mobile as the test employee from 5.3 — should fail with duplicate error
+    const mobile = `99${String(RUN_ID).padStart(8, '0')}`;
+    const r = await call('employee_create', {
+      tenant_id: state.employeeTenantId,
+      name: `Duplicate Test ${RUN_ID}`,
+      mobile_number: mobile,
+      roles: [{ code: 'EMPLOYEE', name: 'Employee' }, { code: 'GRO', name: 'Grievance Routing Officer' }],
+      department: 'DEPT_1',
+      designation: 'DESIG_1',
+      jurisdiction_boundary_type: 'City',
+      jurisdiction_boundary: state.employeeTenantId,
+    });
+    // Could fail for duplicate or succeed if mobile is different; we just want to exercise the error classification code
+    assert(typeof r.success === 'boolean', `employee_create should return success boolean, got: ${typeof r.success}`);
+    if (!r.success) {
+      assert(typeof r.hint === 'string', 'failed employee_create should include hint');
+      console.log(`        Error classification: ${(r.hint as string).substring(0, 100)}`);
+    } else {
+      console.log(`        Unexpectedly succeeded (different mobile?) — still exercises code path`);
+    }
+    return ['employee_create'];
+  });
+
+  await test('17.9 mdms_create: nonexistent schema', async () => {
+    const r = await call('mdms_create', {
+      tenant_id: state.stateTenantId,
+      schema_code: 'nonexistent.SchemaXYZ999',
+      unique_identifier: `${TEST_PREFIX}_FAKE`,
+      data: { code: `${TEST_PREFIX}_FAKE`, name: 'Fake record' },
+    });
+    assert(r.success === false, 'mdms_create with nonexistent schema should fail');
+    assert(typeof r.hint === 'string', 'should include hint');
+    console.log(`        Correctly rejected: ${(r.error as string)?.substring(0, 80)}`);
+    console.log(`        Hint: ${(r.hint as string)?.substring(0, 100)}`);
+    return ['mdms_create'];
+  });
+
+  await test('17.10 mdms_create: duplicate record', async () => {
+    // Try to create the same record as test 2.8 — should hit the NON_UNIQUE error path
+    const r = await call('mdms_create', {
+      tenant_id: state.stateTenantId,
+      schema_code: state.mdmsRecordSchemaCode,
+      unique_identifier: state.mdmsRecordUniqueId,
+      data: {
+        code: state.mdmsRecordUniqueId,
+        name: `Duplicate Test ${RUN_ID}`,
+        active: true,
+      },
+    });
+    // Should fail with NON_UNIQUE or succeed (idempotent) — both exercise error analysis
+    assert(typeof r.success === 'boolean', `mdms_create should return success boolean, got: ${typeof r.success}`);
+    if (!r.success) {
+      assert(typeof r.hint === 'string', 'duplicate mdms_create failure should include hint');
+      console.log(`        Duplicate correctly detected: ${(r.error as string)?.substring(0, 80)}`);
+    } else {
+      console.log(`        Idempotent create succeeded (OK)`);
+    }
+    return ['mdms_create'];
+  });
+
+  await testWithDeps('17.11 pgr_update: invalid state transition', ['7.11 pgr_update: RATE'], async () => {
+    if (!state.complaintId) {
+      console.log('        No complaint available, skipping');
+      return ['pgr_update'];
+    }
+    // Complaint #1 should be CLOSEDAFTERRESOLUTION after RATE — trying ASSIGN should fail
+    const r = await call('pgr_update', {
+      tenant_id: state.complaintTenantId,
+      service_request_id: state.complaintId,
+      action: 'ASSIGN',
+      comment: 'Integration test: invalid transition',
+    });
+    assert(r.success === false, 'pgr_update with invalid transition should fail');
+    assert(typeof r.hint === 'string', 'should include workflow hint');
+    // Verify it's a state/transition error, not a role error
+    const hint = r.hint as string;
+    const isStateHint = hint.includes('state') || hint.includes('transition') || hint.includes('status') || hint.includes('action');
+    assert(isStateHint, `hint should reference state/transition issue, got: ${hint.substring(0, 120)}`);
+    console.log(`        Correctly rejected invalid transition: ${(r.error as string)?.substring(0, 80)}`);
+    return ['pgr_update'];
+  });
+
+  await test('17.12 employee_create: invalid role code', async () => {
+    const r = await call('employee_create', {
+      tenant_id: state.employeeTenantId,
+      name: `Invalid Role Test ${RUN_ID}`,
+      mobile_number: `60${String(RUN_ID).padStart(8, '0')}`,
+      roles: [{ code: 'COMPLETELY_FAKE_ROLE_XYZ', name: 'Fake Role' }],
+      department: 'DEPT_1',
+      designation: 'DESIG_1',
+      jurisdiction_boundary_type: 'City',
+      jurisdiction_boundary: state.employeeTenantId,
+    });
+    assert(typeof r.success === 'boolean', `employee_create should return success boolean, got: ${typeof r.success}`);
+    if (!r.success) {
+      assert(typeof r.hint === 'string', 'failed employee_create should include hint');
+      console.log(`        Error classification: ${(r.hint as string).substring(0, 100)}`);
+    } else {
+      // Some DIGIT environments accept any role code — still exercises the code path
+      console.log(`        Server accepted invalid role (no validation) — code path still exercised`);
+    }
+    return ['employee_create'];
+  });
+
+  await test('17.13 workflow_create: nonexistent source tenant', async () => {
+    const r = await call('workflow_create', {
+      tenant_id: state.stateTenantId,
+      copy_from_tenant: 'nonexistent.xyz.999',
+    });
+    assert(r.success === false, 'workflow_create with nonexistent source should fail');
+    assert(typeof r.error === 'string' && (r.error as string).length > 0,
+      'should include error message');
+    console.log(`        Correctly rejected: ${(r.error as string).substring(0, 80)}`);
+    return ['workflow_create'];
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // Section 18: Cleanup test data on pg
+  // ──────────────────────────────────────────────────────────────────
+  console.log('\n── Section 18: Cleanup ──');
+
+  await test('18.1 cleanup: soft-delete test MDMS record via mdms_search', async () => {
+    // Verify the test MDMS record exists via the mdms_search tool, then deactivate via direct API.
+    const searchResult = await call('mdms_search', {
+      tenant_id: state.stateTenantId,
+      schema_code: state.mdmsRecordSchemaCode,
+      unique_identifiers: [state.mdmsRecordUniqueId],
+    });
+    assert(typeof searchResult.success === 'boolean', 'mdms_search should return success boolean');
+    if (searchResult.success) {
+      // Try to deactivate via direct API (cleanup, not testing a tool)
+      try {
+        const records = await digitApi.mdmsV2SearchRaw(
+          state.stateTenantId,
+          state.mdmsRecordSchemaCode,
+          { uniqueIdentifiers: [state.mdmsRecordUniqueId], limit: 1 },
+        );
+        if (records.length > 0 && records[0].isActive) {
+          await digitApi.mdmsV2Update(records[0], false);
+          console.log(`        Deactivated test MDMS record: ${state.mdmsRecordUniqueId}`);
+        } else {
+          console.log(`        Test MDMS record already inactive or not found`);
+        }
+      } catch (err) {
+        console.log(`        Direct API cleanup failed (non-critical): ${(err as Error).message?.substring(0, 60)}`);
       }
-    } catch (err) {
-      // Fall back to search-only if digitApi cleanup fails (e.g. not authenticated)
-      console.log(`        Cleanup via API failed (${err instanceof Error ? err.message : err}), searching only`);
-      await call('mdms_search', {
-        tenant_id: state.stateTenantId,
-        schema_code: state.mdmsRecordSchemaCode,
-        unique_identifiers: [state.mdmsRecordUniqueId],
-      });
     }
     return ['mdms_search'];
   });
 
-  await test('16.2 cleanup: deactivate second test employee', async () => {
+  await test('18.2 cleanup: deactivate second test employee', async () => {
     if (!state.employeeCode2) {
-      console.log(`        No second employee to clean up`);
+      console.log(`        No second employee to clean up (skipped)`);
       return ['employee_update'];
     }
-    try {
-      const r = await call('employee_update', {
-        tenant_id: state.employeeTenantId,
-        employee_code: state.employeeCode2,
-        deactivate: true,
-      });
-      console.log(`        Deactivated second employee: ${state.employeeCode2} (success=${r.success})`);
-    } catch (err) {
-      console.log(`        Cleanup failed: ${(err as Error).message?.substring(0, 80)}`);
+    const r = await call('employee_update', {
+      tenant_id: state.employeeTenantId,
+      employee_code: state.employeeCode2,
+      deactivate: true,
+    });
+    // employee_update should return a well-formed response
+    assert(typeof r.success === 'boolean', `employee_update should return success boolean, got: ${typeof r.success}`);
+    const isHrmsUpdateBug = !r.success && ((r.error as string) || '').includes('getUser()');
+    if (isHrmsUpdateBug) {
+      markKnownBug('18.2 cleanup: deactivate second test employee', 'HRMS _update NPE on Employee.getUser()');
+    } else if (r.success) {
+      console.log(`        Deactivated second employee: ${state.employeeCode2}`);
+    } else {
+      console.log(`        Cleanup failed (non-critical): ${r.error}`);
     }
     return ['employee_update'];
   });
@@ -1507,30 +2068,58 @@ async function main() {
 
   const covered = ALL_TOOL_NAMES.filter(t => toolsCovered.has(t));
   const uncovered = ALL_TOOL_NAMES.filter(t => !toolsCovered.has(t));
+  const onlySkipped = ALL_TOOL_NAMES.filter(t => !toolsCovered.has(t) && toolsSkipped.has(t));
+  const trulyUncovered = ALL_TOOL_NAMES.filter(t => !toolsCovered.has(t) && !toolsSkipped.has(t));
   const coveragePct = ((covered.length / ALL_TOOL_NAMES.length) * 100).toFixed(1);
+  const authenticPassed = passed.length - knownBugTests.length;
 
-  console.log(`\n  Tools: ${covered.length}/${ALL_TOOL_NAMES.length} covered (${coveragePct}%)`);
+  console.log(`\n  Tools: ${covered.length}/${ALL_TOOL_NAMES.length} CALLED (${coveragePct}%)`);
+  if (onlySkipped.length > 0) {
+    console.log(`  Skipped (infra-dependent): ${onlySkipped.length} tools — NOT counted as covered`);
+  }
   console.log(`  Tests: ${passed.length} passed, ${failed.length} failed, ${skipped.length} skipped`);
+  if (knownBugTests.length > 0) {
+    console.log(`  Known server bugs: ${knownBugTests.length} tests hit HRMS _update NPE (tool called, result untestable)`);
+  }
+  console.log(`  Authentic passes: ${authenticPassed} (excluding known-bug workarounds)`);
 
-  if (uncovered.length > 0) {
-    console.log(`\n  \x1b[31mUNCOVERED tools (${uncovered.length}):\x1b[0m`);
-    for (const t of uncovered) {
+  if (trulyUncovered.length > 0) {
+    console.log(`\n  \x1b[31mUNCOVERED tools (${trulyUncovered.length}):\x1b[0m`);
+    for (const t of trulyUncovered) {
       console.log(`    - ${t}`);
     }
-  } else {
-    console.log(`\n  \x1b[32m✓ 100% tool coverage achieved!\x1b[0m`);
+  }
+  if (onlySkipped.length > 0) {
+    console.log(`\n  \x1b[33mSKIPPED tools (infra-dependent, ${onlySkipped.length}):\x1b[0m`);
+    for (const t of onlySkipped) {
+      console.log(`    - ${t}`);
+    }
+  }
+  if (trulyUncovered.length === 0 && onlySkipped.length === 0) {
+    console.log(`\n  \x1b[32m✓ 100% authentic tool coverage!\x1b[0m`);
+  } else if (trulyUncovered.length === 0) {
+    console.log(`\n  \x1b[32m✓ 100% tool coverage (all available infra)!\x1b[0m`);
+    console.log(`  \x1b[33m⚠ ${onlySkipped.length} tools need Tempo/Docker for full coverage\x1b[0m`);
   }
 
   console.log('\n  Tool Coverage Matrix:');
   console.log('  ' + '-'.repeat(60));
   for (const tool of ALL_TOOL_NAMES) {
-    const mark = toolsCovered.has(tool) ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
+    let mark: string;
+    if (toolsCovered.has(tool)) {
+      mark = '\x1b[32m✓\x1b[0m';
+    } else if (toolsSkipped.has(tool)) {
+      mark = '\x1b[33m~\x1b[0m'; // skipped due to infra
+    } else {
+      mark = '\x1b[31m✗\x1b[0m';
+    }
     const tests = results
       .filter(r => r.toolsCalled.includes(tool))
       .map(r => r.name.split(' ')[0])
       .slice(0, 4);
     const testList = tests.length > 0 ? `  ← ${tests.join(', ')}` : '';
-    console.log(`  ${mark} ${tool.padEnd(35)}${testList}`);
+    const suffix = toolsSkipped.has(tool) && !toolsCovered.has(tool) ? ' (skipped)' : '';
+    console.log(`  ${mark} ${tool.padEnd(35)}${testList}${suffix}`);
   }
 
   // ════════════════════════════════════════════════════════════════════
@@ -1541,10 +2130,11 @@ async function main() {
   console.log('╔══════════════════════════════════════════════════════════════╗');
   console.log('║                     TEST RESULTS                            ║');
   console.log('╚══════════════════════════════════════════════════════════════╝');
-  console.log(`\n  Total:   ${results.length}`);
-  console.log(`  Passed:  \x1b[32m${passed.length}\x1b[0m`);
-  console.log(`  Failed:  \x1b[31m${failed.length}\x1b[0m`);
-  console.log(`  Skipped: \x1b[33m${skipped.length}\x1b[0m`);
+  console.log(`\n  Total:      ${results.length}`);
+  console.log(`  Passed:     \x1b[32m${passed.length}\x1b[0m`);
+  console.log(`  Failed:     \x1b[31m${failed.length}\x1b[0m`);
+  console.log(`  Skipped:    \x1b[33m${skipped.length}\x1b[0m`);
+  console.log(`  Known bugs: \x1b[33m${knownBugTests.length}\x1b[0m`);
 
   if (failed.length > 0) {
     console.log(`\n  Failed tests:`);
@@ -1553,9 +2143,19 @@ async function main() {
     }
   }
 
+  if (knownBugTests.length > 0) {
+    console.log(`\n  Known server bug tests (tool called, server NPE):`);
+    for (const name of knownBugTests) {
+      console.log(`    \x1b[33m⚠\x1b[0m ${name}`);
+    }
+  }
+
   const totalMs = results.reduce((sum, r) => sum + r.ms, 0);
   console.log(`\n  Total time: ${(totalMs / 1000).toFixed(1)}s`);
-  console.log(`  Coverage:   ${coveragePct}% (${covered.length}/${ALL_TOOL_NAMES.length})`);
+  console.log(`  Coverage:   ${coveragePct}% (${covered.length}/${ALL_TOOL_NAMES.length} tools called)`);
+  if (onlySkipped.length > 0) {
+    console.log(`  Note:       ${onlySkipped.length} tools only in skip list (need Tempo/Docker)`);
+  }
   console.log('');
 
   if (failed.length > 0) {

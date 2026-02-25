@@ -50,42 +50,51 @@ export function registerUserTools(registry: ToolRegistry): void {
     handler: async (args) => {
       await ensureAuthenticated();
 
-      const users = await digitApi.userSearch(args.tenant_id as string, {
-        userName: args.user_name as string | undefined,
-        mobileNumber: args.mobile_number as string | undefined,
-        uuid: args.uuid as string[] | undefined,
-        roleCodes: args.role_codes as string[] | undefined,
-        userType: args.user_type as string | undefined,
-        limit: (args.limit as number) || 100,
-        offset: (args.offset as number) || 0,
-      });
+      try {
+        const users = await digitApi.userSearch(args.tenant_id as string, {
+          userName: args.user_name as string | undefined,
+          mobileNumber: args.mobile_number as string | undefined,
+          uuid: args.uuid as string[] | undefined,
+          roleCodes: args.role_codes as string[] | undefined,
+          userType: args.user_type as string | undefined,
+          limit: (args.limit as number) || 100,
+          offset: (args.offset as number) || 0,
+        });
 
-      return JSON.stringify(
-        {
-          success: true,
-          tenantId: args.tenant_id,
-          count: users.length,
-          users: users.slice(0, 50).map((u) => ({
-            id: u.id,
-            uuid: u.uuid,
-            userName: u.userName,
-            name: u.name,
-            mobileNumber: u.mobileNumber,
-            emailId: u.emailId,
-            type: u.type,
-            active: u.active,
-            tenantId: u.tenantId,
-            roles: ((u.roles || []) as Array<{ code: string; name?: string; tenantId?: string }>).map((r) => ({
-              code: r.code,
-              name: r.name,
-              tenantId: r.tenantId,
+        return JSON.stringify(
+          {
+            success: true,
+            tenantId: args.tenant_id,
+            count: users.length,
+            users: users.slice(0, 50).map((u) => ({
+              id: u.id,
+              uuid: u.uuid,
+              userName: u.userName,
+              name: u.name,
+              mobileNumber: u.mobileNumber,
+              emailId: u.emailId,
+              type: u.type,
+              active: u.active,
+              tenantId: u.tenantId,
+              roles: ((u.roles || []) as Array<{ code: string; name?: string; tenantId?: string }>).map((r) => ({
+                code: r.code,
+                name: r.name,
+                tenantId: r.tenantId,
+              })),
             })),
-          })),
-          truncated: users.length > 50,
-        },
-        null,
-        2
-      );
+            truncated: users.length > 50,
+          },
+          null,
+          2
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return JSON.stringify({
+          success: false,
+          error: msg,
+          hint: 'User search failed. Some filter combinations (e.g. user_type) may not be supported by all DIGIT environments.',
+        }, null, 2);
+      }
     },
   } satisfies ToolMetadata);
 

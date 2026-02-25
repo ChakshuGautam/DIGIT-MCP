@@ -902,31 +902,6 @@ class DigitApiClient {
     return data.BoundaryRelationship || {};
   }
 
-  // Boundary — search boundary relationships
-  async boundaryRelationshipSearch(
-    tenantId: string,
-    hierarchyType: string,
-    boundaryType?: string,
-    parent?: string,
-    codes?: string[]
-  ): Promise<Record<string, unknown>[]> {
-    const data = await this.request<{ TenantBoundary?: Record<string, unknown>[] }>(
-      this.endpoint('BOUNDARY_RELATIONSHIP_SEARCH'),
-      {
-        RequestInfo: this.buildRequestInfo(),
-        BoundaryRelationship: {
-          tenantId,
-          hierarchyType,
-          boundaryType,
-          parent,
-          code: codes,
-        },
-      }
-    );
-
-    return data.TenantBoundary || [];
-  }
-
   // Boundary Management — process (upload/update boundary data)
   async boundaryMgmtProcess(
     tenantId: string,
