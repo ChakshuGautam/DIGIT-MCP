@@ -659,25 +659,21 @@ class DigitApiClient {
     return (data.BusinessServices || [])[0] || {};
   }
 
-  // Workflow process instance search
+  // Workflow process instance search — tenantId and businessIds as query params
   async workflowProcessSearch(
     tenantId: string,
     businessIds?: string[],
     options?: { limit?: number; offset?: number; moduleName?: string }
   ): Promise<Record<string, unknown>[]> {
-    const criteria: Record<string, unknown> = {
-      tenantId,
-      moduleName: options?.moduleName || 'pgr-services',
-      limit: options?.limit || 50,
-      offset: options?.offset || 0,
-    };
-    if (businessIds?.length) criteria.businessIds = businessIds;
+    const params = new URLSearchParams({ tenantId });
+    if (businessIds?.length) params.append('businessIds', businessIds.join(','));
+    params.append('limit', String(options?.limit || 50));
+    params.append('offset', String(options?.offset || 0));
 
     const data = await this.request<{ ProcessInstances?: Record<string, unknown>[] }>(
-      this.endpoint('WORKFLOW_PROCESS_SEARCH'),
+      `${this.endpoint('WORKFLOW_PROCESS_SEARCH')}?${params.toString()}`,
       {
         RequestInfo: this.buildRequestInfo(),
-        criteria,
       }
     );
 
@@ -819,17 +815,12 @@ class DigitApiClient {
     tenantId: string,
     encryptedValues: string[]
   ): Promise<string[]> {
+    // The decrypt API expects a flat JSON array of encrypted strings, not an envelope
     const url = `${this.environment.url}${this.endpoint('ENC_DECRYPT')}`;
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        decryptionRequests: encryptedValues.map((value) => ({
-          tenantId,
-          type: 'Normal',
-          value,
-        })),
-      }),
+      body: JSON.stringify(encryptedValues),
     });
 
     if (!response.ok) {

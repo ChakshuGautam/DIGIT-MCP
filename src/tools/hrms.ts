@@ -314,12 +314,13 @@ export function registerHrmsTools(registry: ToolRegistry): void {
       const employee = { ...employees[0] };
 
       // HRMS search may return employees without user data populated;
-      // if user is null, fetch it separately via user search by UUID
+      // if user is null, fetch it separately via user search by UUID.
+      // User search requires the root tenant (e.g. "pg"), not city-level (e.g. "pg.citya").
       let user = employee.user as Record<string, unknown> | null;
       if (!user || !user.mobileNumber) {
         const uuid = employee.uuid as string | undefined;
         if (uuid) {
-          const users = await digitApi.userSearch(tenantId, { uuid: [uuid] });
+          const users = await digitApi.userSearch(roleTenant, { uuid: [uuid] });
           if (users.length > 0) {
             user = users[0];
           }

@@ -4,7 +4,7 @@ import { ENDPOINTS } from './endpoints.js';
 export const ENVIRONMENTS: Record<string, Environment> = {
   'chakshu-digit': {
     name: 'Chakshu Dev',
-    url: process.env.CRS_API_URL || 'https://localhost',
+    url: process.env.CRS_API_URL || 'https://api.egov.theflywheel.in',
     stateTenantId: process.env.CRS_STATE_TENANT || 'pg',
     description: 'Chakshu development environment',
     endpointOverrides: {
