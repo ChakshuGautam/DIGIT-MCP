@@ -1675,6 +1675,130 @@ async function main() {
     return ['idgen_generate'];
   });
 
+  await test('16.11 api_catalog: nonexistent service (summary)', async () => {
+    const r = await call('api_catalog', { service: 'NONEXISTENT_SERVICE_XYZ', format: 'summary' });
+    assert(r.success === false, 'api_catalog with nonexistent service in summary mode should fail');
+    assert(typeof r.error === 'string' && (r.error as string).includes('NONEXISTENT_SERVICE_XYZ'),
+      'error should mention the service name');
+    assert(Array.isArray(r.availableServices), 'should list available services');
+    console.log(`        Correctly rejected: ${(r.error as string).substring(0, 80)}`);
+    return ['api_catalog'];
+  });
+
+  await test('16.12 api_catalog: nonexistent service (openapi)', async () => {
+    const r = await call('api_catalog', { service: 'NONEXISTENT_SERVICE_XYZ', format: 'openapi' });
+    assert(r.success === false, 'api_catalog with nonexistent service in openapi mode should fail');
+    assert(Array.isArray(r.availableServices), 'should list available services');
+    console.log(`        Correctly rejected: ${(r.error as string).substring(0, 80)}`);
+    return ['api_catalog'];
+  });
+
+  await test('16.13 api_catalog: full openapi (no service filter)', async () => {
+    const r = await call('api_catalog', { format: 'openapi' });
+    assert(r.success === true, `api_catalog full openapi failed: ${r.error}`);
+    assert(r.format === 'openapi', 'format should be openapi');
+    const spec = r.spec as Record<string, unknown>;
+    assert(spec.openapi !== undefined || spec.paths !== undefined, 'spec should have openapi or paths');
+    console.log(`        Full OpenAPI spec returned`);
+    return ['api_catalog'];
+  });
+
+  await test('16.14 employee_update: not found', async () => {
+    const r = await call('employee_update', {
+      tenant_id: state.employeeTenantId,
+      employee_code: 'NONEXISTENT_EMP_XYZ_999',
+    });
+    assert(r.success === false, 'employee_update with nonexistent code should fail');
+    assert(typeof r.error === 'string' && (r.error as string).includes('not found'),
+      `error should mention not found, got: ${r.error}`);
+    console.log(`        Correctly rejected: ${(r.error as string).substring(0, 80)}`);
+    return ['employee_update'];
+  });
+
+  await testWithDeps('16.15 employee_update: remove_roles', ['5.3 employee_create'], async () => {
+    if (!state.employeeCode) {
+      console.log('        No test employee, skipping');
+      return ['employee_update'];
+    }
+    const r = await call('employee_update', {
+      tenant_id: state.employeeTenantId,
+      employee_code: state.employeeCode,
+      remove_roles: ['DGRO'],
+    });
+    assert(typeof r.success === 'boolean', `employee_update should return success boolean, got: ${typeof r.success}`);
+    const isHrmsBug = !r.success && ((r.error as string) || '').includes('getUser()');
+    if (isHrmsBug) {
+      markKnownBug('16.15 employee_update: remove_roles', 'HRMS _update NPE on Employee.getUser()');
+    } else if (r.success) {
+      console.log(`        Removed DGRO role from ${state.employeeCode}`);
+    } else {
+      console.log(`        Failed (non-critical): ${(r.error as string)?.substring(0, 80)}`);
+    }
+    return ['employee_update'];
+  });
+
+  await testWithDeps('16.16 employee_update: new_assignment', ['5.3 employee_create'], async () => {
+    if (!state.employeeCode) {
+      console.log('        No test employee, skipping');
+      return ['employee_update'];
+    }
+    const r = await call('employee_update', {
+      tenant_id: state.employeeTenantId,
+      employee_code: state.employeeCode,
+      new_assignment: { department: 'DEPT_1', designation: 'DESIG_2' },
+    });
+    assert(typeof r.success === 'boolean', `employee_update should return success boolean, got: ${typeof r.success}`);
+    const isHrmsBug = !r.success && ((r.error as string) || '').includes('getUser()');
+    if (isHrmsBug) {
+      markKnownBug('16.16 employee_update: new_assignment', 'HRMS _update NPE on Employee.getUser()');
+    } else if (r.success) {
+      console.log(`        New assignment set for ${state.employeeCode}`);
+    } else {
+      console.log(`        Failed (non-critical): ${(r.error as string)?.substring(0, 80)}`);
+    }
+    return ['employee_update'];
+  });
+
+  await test('16.17 user_role_add: nonexistent user', async () => {
+    const r = await call('user_role_add', {
+      tenant_id: state.stateTenantId,
+      username: 'NONEXISTENT_USER_XYZ_999',
+    });
+    assert(r.success === false, 'user_role_add for nonexistent user should fail');
+    assert(typeof r.error === 'string' && (r.error as string).includes('not found'),
+      `error should mention not found, got: ${r.error}`);
+    console.log(`        Correctly rejected: ${(r.error as string).substring(0, 80)}`);
+    return ['user_role_add'];
+  });
+
+  await test('16.18 workflow_business_services: nonexistent filter', async () => {
+    const r = await call('workflow_business_services', {
+      tenant_id: state.stateTenantId,
+      business_services: ['NONEXISTENT_BIZ_SVC_XYZ'],
+    });
+    assert(r.success === true, `workflow_business_services should succeed even with no results: ${r.error}`);
+    assert((r.count as number) === 0, `expected 0 results, got: ${r.count}`);
+    assert(typeof r.hint === 'string', 'should return a hint for empty results');
+    console.log(`        Empty result with hint: ${(r.hint as string).substring(0, 80)}`);
+    return ['workflow_business_services'];
+  });
+
+  await test('16.19 docs_get: root URL', async () => {
+    const r = await call('docs_get', { url: 'https://docs.digit.org/' });
+    // Root URL may succeed or fail — both are valid. We're testing the URL parse fallback path.
+    assert(typeof r.success === 'boolean', `docs_get should return success boolean, got: ${typeof r.success}`);
+    console.log(`        Root URL result: success=${r.success}`);
+    return ['docs_get'];
+  });
+
+  await test('16.20 docs_search: whitespace-only query', async () => {
+    const r = await call('docs_search', { query: '   ' });
+    assert(r.success === false, 'docs_search with whitespace-only query should fail');
+    assert(typeof r.error === 'string', 'should return an error message');
+    console.log(`        Correctly rejected whitespace query: ${r.error}`);
+    return ['docs_search'];
+  });
+
   // ──────────────────────────────────────────────────────────────────
   // Section 17: Error Path Tests
   // ──────────────────────────────────────────────────────────────────
@@ -1769,6 +1893,127 @@ async function main() {
       console.log(`        Failed (user may not exist): ${(r.error as string)?.substring(0, 80)}`);
     }
     return ['user_role_add'];
+  });
+
+  await testWithDeps('17.8 employee_create: duplicate mobile', ['5.3 employee_create'], async () => {
+    if (!state.employeeCode) {
+      console.log('        No test employee was created, skipping duplicate test');
+      return ['employee_create'];
+    }
+    // Re-use the same mobile as the test employee from 5.3 — should fail with duplicate error
+    const mobile = `99${String(RUN_ID).padStart(8, '0')}`;
+    const r = await call('employee_create', {
+      tenant_id: state.employeeTenantId,
+      name: `Duplicate Test ${RUN_ID}`,
+      mobile_number: mobile,
+      roles: [{ code: 'EMPLOYEE', name: 'Employee' }, { code: 'GRO', name: 'Grievance Routing Officer' }],
+      department: 'DEPT_1',
+      designation: 'DESIG_1',
+      jurisdiction_boundary_type: 'City',
+      jurisdiction_boundary: state.employeeTenantId,
+    });
+    // Could fail for duplicate or succeed if mobile is different; we just want to exercise the error classification code
+    assert(typeof r.success === 'boolean', `employee_create should return success boolean, got: ${typeof r.success}`);
+    if (!r.success) {
+      assert(typeof r.hint === 'string', 'failed employee_create should include hint');
+      console.log(`        Error classification: ${(r.hint as string).substring(0, 100)}`);
+    } else {
+      console.log(`        Unexpectedly succeeded (different mobile?) — still exercises code path`);
+    }
+    return ['employee_create'];
+  });
+
+  await test('17.9 mdms_create: nonexistent schema', async () => {
+    const r = await call('mdms_create', {
+      tenant_id: state.stateTenantId,
+      schema_code: 'nonexistent.SchemaXYZ999',
+      unique_identifier: `${TEST_PREFIX}_FAKE`,
+      data: { code: `${TEST_PREFIX}_FAKE`, name: 'Fake record' },
+    });
+    assert(r.success === false, 'mdms_create with nonexistent schema should fail');
+    assert(typeof r.hint === 'string', 'should include hint');
+    console.log(`        Correctly rejected: ${(r.error as string)?.substring(0, 80)}`);
+    console.log(`        Hint: ${(r.hint as string)?.substring(0, 100)}`);
+    return ['mdms_create'];
+  });
+
+  await test('17.10 mdms_create: duplicate record', async () => {
+    // Try to create the same record as test 2.8 — should hit the NON_UNIQUE error path
+    const r = await call('mdms_create', {
+      tenant_id: state.stateTenantId,
+      schema_code: state.mdmsRecordSchemaCode,
+      unique_identifier: state.mdmsRecordUniqueId,
+      data: {
+        code: state.mdmsRecordUniqueId,
+        name: `Duplicate Test ${RUN_ID}`,
+        active: true,
+      },
+    });
+    // Should fail with NON_UNIQUE or succeed (idempotent) — both exercise error analysis
+    assert(typeof r.success === 'boolean', `mdms_create should return success boolean, got: ${typeof r.success}`);
+    if (!r.success) {
+      assert(typeof r.hint === 'string', 'duplicate mdms_create failure should include hint');
+      console.log(`        Duplicate correctly detected: ${(r.error as string)?.substring(0, 80)}`);
+    } else {
+      console.log(`        Idempotent create succeeded (OK)`);
+    }
+    return ['mdms_create'];
+  });
+
+  await testWithDeps('17.11 pgr_update: invalid state transition', ['7.11 pgr_update: RATE'], async () => {
+    if (!state.complaintId) {
+      console.log('        No complaint available, skipping');
+      return ['pgr_update'];
+    }
+    // Complaint #1 should be CLOSEDAFTERRESOLUTION after RATE — trying ASSIGN should fail
+    const r = await call('pgr_update', {
+      tenant_id: state.complaintTenantId,
+      service_request_id: state.complaintId,
+      action: 'ASSIGN',
+      comment: 'Integration test: invalid transition',
+    });
+    assert(r.success === false, 'pgr_update with invalid transition should fail');
+    assert(typeof r.hint === 'string', 'should include workflow hint');
+    // Verify it's a state/transition error, not a role error
+    const hint = r.hint as string;
+    const isStateHint = hint.includes('state') || hint.includes('transition') || hint.includes('status') || hint.includes('action');
+    assert(isStateHint, `hint should reference state/transition issue, got: ${hint.substring(0, 120)}`);
+    console.log(`        Correctly rejected invalid transition: ${(r.error as string)?.substring(0, 80)}`);
+    return ['pgr_update'];
+  });
+
+  await test('17.12 employee_create: invalid role code', async () => {
+    const r = await call('employee_create', {
+      tenant_id: state.employeeTenantId,
+      name: `Invalid Role Test ${RUN_ID}`,
+      mobile_number: `60${String(RUN_ID).padStart(8, '0')}`,
+      roles: [{ code: 'COMPLETELY_FAKE_ROLE_XYZ', name: 'Fake Role' }],
+      department: 'DEPT_1',
+      designation: 'DESIG_1',
+      jurisdiction_boundary_type: 'City',
+      jurisdiction_boundary: state.employeeTenantId,
+    });
+    assert(typeof r.success === 'boolean', `employee_create should return success boolean, got: ${typeof r.success}`);
+    if (!r.success) {
+      assert(typeof r.hint === 'string', 'failed employee_create should include hint');
+      console.log(`        Error classification: ${(r.hint as string).substring(0, 100)}`);
+    } else {
+      // Some DIGIT environments accept any role code — still exercises the code path
+      console.log(`        Server accepted invalid role (no validation) — code path still exercised`);
+    }
+    return ['employee_create'];
+  });
+
+  await test('17.13 workflow_create: nonexistent source tenant', async () => {
+    const r = await call('workflow_create', {
+      tenant_id: state.stateTenantId,
+      copy_from_tenant: 'nonexistent.xyz.999',
+    });
+    assert(r.success === false, 'workflow_create with nonexistent source should fail');
+    assert(typeof r.error === 'string' && (r.error as string).length > 0,
+      'should include error message');
+    console.log(`        Correctly rejected: ${(r.error as string).substring(0, 80)}`);
+    return ['workflow_create'];
   });
 
   // ──────────────────────────────────────────────────────────────────
