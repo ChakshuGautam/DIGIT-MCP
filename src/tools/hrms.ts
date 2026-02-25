@@ -312,7 +312,27 @@ export function registerHrmsTools(registry: ToolRegistry): void {
       }
 
       const employee = { ...employees[0] };
-      const user = { ...(employee.user as Record<string, unknown>) };
+
+      // HRMS search may return employees without user data populated;
+      // if user is null, fetch it separately via user search by UUID
+      let user = employee.user as Record<string, unknown> | null;
+      if (!user || !user.mobileNumber) {
+        const uuid = employee.uuid as string | undefined;
+        if (uuid) {
+          const users = await digitApi.userSearch(tenantId, { uuid: [uuid] });
+          if (users.length > 0) {
+            user = users[0];
+          }
+        }
+        if (!user || !user.mobileNumber) {
+          return JSON.stringify({
+            success: false,
+            error: `Employee "${employeeCode}" has no associated user record. The HRMS service returned an employee without user data.`,
+            hint: 'This may indicate a data integrity issue. Try searching the user directly with user_search.',
+          }, null, 2);
+        }
+      }
+      user = { ...user };
       let currentRoles = [...((user.roles || []) as Array<{ code: string; name: string; tenantId?: string }>)];
 
       // Add roles

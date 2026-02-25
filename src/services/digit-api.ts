@@ -519,7 +519,7 @@ class DigitApiClient {
     return data.messages || [];
   }
 
-  // Localization upsert — tenantId & locale as query params, messages in body
+  // Localization upsert — tenantId in both query params and body (server validates both)
   async localizationUpsert(
     tenantId: string,
     locale: string,
@@ -531,6 +531,7 @@ class DigitApiClient {
       `${this.endpoint('LOCALIZATION_UPSERT')}?${params.toString()}`,
       {
         RequestInfo: this.buildRequestInfo(),
+        tenantId,
         messages: messages.map((m) => ({ ...m, locale })),
       }
     );
@@ -662,10 +663,11 @@ class DigitApiClient {
   async workflowProcessSearch(
     tenantId: string,
     businessIds?: string[],
-    options?: { limit?: number; offset?: number }
+    options?: { limit?: number; offset?: number; moduleName?: string }
   ): Promise<Record<string, unknown>[]> {
     const criteria: Record<string, unknown> = {
       tenantId,
+      moduleName: options?.moduleName || 'pgr-services',
       limit: options?.limit || 50,
       offset: options?.offset || 0,
     };

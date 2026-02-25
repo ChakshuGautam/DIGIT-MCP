@@ -4,9 +4,9 @@ import { ENDPOINTS } from './endpoints.js';
 export const ENVIRONMENTS: Record<string, Environment> = {
   'chakshu-digit': {
     name: 'Chakshu Dev',
-    url: 'https://api.egov.theflywheel.in',
-    stateTenantId: 'pg',
-    description: 'Chakshu development environment (Flywheel)',
+    url: process.env.CRS_API_URL || 'https://localhost',
+    stateTenantId: process.env.CRS_STATE_TENANT || 'pg',
+    description: 'Chakshu development environment',
     endpointOverrides: {
       MDMS_SEARCH: '/mdms-v2/v2/_search',
       MDMS_CREATE: '/mdms-v2/v2/_create',
