@@ -106,17 +106,21 @@ async function loadFlows(): Promise<Flow[]> {
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-function parseArgs(): { flowNames: string[] } {
+function parseArgs(): { flowNames: string[]; verbose: boolean } {
   const args = process.argv.slice(2);
   const flowNames: string[] = [];
+  let verbose = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--flow" && i + 1 < args.length) {
       flowNames.push(args[++i]);
     }
+    if (args[i] === "--verbose" || args[i] === "-v") {
+      verbose = true;
+    }
   }
 
-  return { flowNames };
+  return { flowNames, verbose };
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +138,13 @@ async function main() {
 
   // Load flows
   const allFlows = await loadFlows();
-  const { flowNames } = parseArgs();
+  const { flowNames, verbose } = parseArgs();
+
+  // Enable verbose logging in helpers
+  if (verbose) {
+    const { setVerbose } = await import("./helpers.js");
+    setVerbose(true);
+  }
 
   // Filter flows if --flow specified
   let flows: Flow[];

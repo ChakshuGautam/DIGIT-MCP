@@ -44,6 +44,13 @@ export interface TurnResult {
 
 const MODEL = process.env.AGENT_TEST_MODEL ?? "claude-sonnet-4-5-20250929";
 
+/** When true, log full conversation (Claude text, tool calls, tool results). */
+export let VERBOSE = process.env.AGENT_TEST_VERBOSE === "1" || process.argv.includes("--verbose");
+
+export function setVerbose(v: boolean) {
+  VERBOSE = v;
+}
+
 const SERVER_PATH = path.resolve(
   import.meta.dirname ?? new URL(".", import.meta.url).pathname,
   "../dist/index.js",
@@ -76,6 +83,12 @@ function mcpServerConfig() {
 // Message parsing
 // ---------------------------------------------------------------------------
 
+/** Truncate a string for verbose output. */
+function truncate(s: string, max = 500): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max) + `... (${s.length - max} more chars)`;
+}
+
 function parseMessages(messages: SDKMessage[]): TurnResult {
   const toolCalls: ToolCall[] = [];
   const toolResults: ToolResult[] = [];
@@ -85,6 +98,7 @@ function parseMessages(messages: SDKMessage[]): TurnResult {
   let costUsd = 0;
   let durationMs = 0;
   let numTurns = 0;
+  let turnCounter = 0;
 
   for (const message of messages) {
     // System init
@@ -94,12 +108,19 @@ function parseMessages(messages: SDKMessage[]): TurnResult {
 
     // Assistant message
     if (message.type === "assistant") {
+      turnCounter++;
       const msg = message as Record<string, unknown>;
       const content = msg.message as { content: Array<Record<string, unknown>> } | undefined;
       if (content?.content) {
+        if (VERBOSE) {
+          console.log(`\n${V.cyan}━━━ Turn ${turnCounter} (Assistant) ━━━${V.reset}`);
+        }
         for (const block of content.content) {
           if (block.type === "text") {
             textParts.push(block.text as string);
+            if (VERBOSE) {
+              console.log(`${V.dim}${truncate(block.text as string, 800)}${V.reset}`);
+            }
           }
           if (block.type === "tool_use") {
             const tc: ToolCall = {
@@ -109,6 +130,11 @@ function parseMessages(messages: SDKMessage[]): TurnResult {
             };
             toolCalls.push(tc);
             toolUseIdToName.set(tc.id, tc.name);
+            if (VERBOSE) {
+              const sn = tc.name.split("__").pop();
+              console.log(`${V.yellow}→ Tool Call: ${sn}${V.reset}`);
+              console.log(`  ${V.dim}${truncate(JSON.stringify(tc.input, null, 2), 600)}${V.reset}`);
+            }
           }
         }
       }
@@ -139,12 +165,22 @@ function parseMessages(messages: SDKMessage[]): TurnResult {
               // not JSON
             }
 
+            const toolName = toolUseIdToName.get(block.tool_use_id as string) ?? "unknown";
             toolResults.push({
               toolUseId: block.tool_use_id as string,
-              toolName: toolUseIdToName.get(block.tool_use_id as string) ?? "unknown",
+              toolName,
               content: textContent,
               parsed,
             });
+
+            if (VERBOSE) {
+              const sn = toolName.split("__").pop();
+              const isError = block.is_error === true;
+              const success = parsed?.success;
+              const statusIcon = isError ? `${V.red}✗` : success === true ? `${V.green}✓` : `${V.yellow}?`;
+              console.log(`${statusIcon} Tool Result: ${sn}${V.reset}`);
+              console.log(`  ${V.dim}${truncate(textContent, 600)}${V.reset}`);
+            }
           }
         }
       }
@@ -160,11 +196,28 @@ function parseMessages(messages: SDKMessage[]): TurnResult {
       if (r.subtype === "success" && r.result) {
         textParts.push(r.result as string);
       }
+      if (VERBOSE) {
+        console.log(`\n${V.cyan}━━━ Result ━━━${V.reset}`);
+        console.log(`${V.dim}Status: ${r.subtype} | Turns: ${numTurns} | Cost: $${costUsd.toFixed(4)}${V.reset}`);
+        if (r.result) {
+          console.log(`${V.dim}${truncate(r.result as string, 400)}${V.reset}`);
+        }
+      }
     }
   }
 
   return { text: textParts.join("\n"), toolCalls, toolResults, sessionId, costUsd, durationMs, numTurns };
 }
+
+/** Verbose logging colors (separate from flow colors). */
+const V = {
+  reset: "\x1b[0m",
+  green: "\x1b[32m",
+  red: "\x1b[31m",
+  yellow: "\x1b[33m",
+  cyan: "\x1b[36m",
+  dim: "\x1b[2m",
+};
 
 // ---------------------------------------------------------------------------
 // V1 query — each call is self-contained
