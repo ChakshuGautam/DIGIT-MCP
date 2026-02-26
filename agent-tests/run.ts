@@ -91,6 +91,7 @@ async function loadFlows(): Promise<Flow[]> {
     await import("./flows/smoke.js"),
     await import("./flows/pgr-lifecycle.js"),
     await import("./flows/employee-mgmt.js"),
+    await import("./flows/guided-setup.js"),
   ];
 
   return flowModules.map((m) => ({
