@@ -10,6 +10,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,9 +75,84 @@ function mcpServerConfig() {
         MCP_ENABLE_ALL_GROUPS: "1",
         // Suppress MCP server logs to stderr
         MCP_LOG_FILE: "/dev/null",
+        // Disable session DB in subprocesses — thoughts are pushed via REST instead
+        SESSION_DB_URL: "disabled",
       },
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Session viewer integration — push thought chain to viewer
+// ---------------------------------------------------------------------------
+
+const VIEWER_URL = process.env.SESSION_VIEWER_URL || "http://localhost:3100";
+let viewerSessionId: string | null = null;
+let globalTurn = 0;
+
+/** Get/create the viewer session ID for this test run. */
+export function getViewerSessionId(): string | null {
+  return viewerSessionId;
+}
+
+async function pushMessagesToViewer(prompt: string, messages: SDKMessage[]): Promise<void> {
+  if (!viewerSessionId) {
+    viewerSessionId = randomUUID();
+  }
+
+  const viewerMessages: Array<{ turn: number; role: string; content: unknown[] }> = [];
+
+  // User prompt
+  globalTurn++;
+  viewerMessages.push({
+    turn: globalTurn,
+    role: "user",
+    content: [{ type: "text", text: prompt }],
+  });
+
+  for (const message of messages) {
+    if (message.type === "assistant") {
+      const msg = message as Record<string, unknown>;
+      const content = msg.message as { content: Array<Record<string, unknown>> } | undefined;
+      if (content?.content && content.content.length > 0) {
+        globalTurn++;
+        viewerMessages.push({
+          turn: globalTurn,
+          role: "assistant",
+          content: content.content,
+        });
+      }
+    }
+
+    if (message.type === "user") {
+      const msg = message as Record<string, unknown>;
+      const content = msg.message as { content: Array<Record<string, unknown>> } | undefined;
+      if (content?.content) {
+        const hasToolResults = content.content.some((b) => b.type === "tool_result");
+        if (hasToolResults) {
+          globalTurn++;
+          viewerMessages.push({
+            turn: globalTurn,
+            role: "tool_result",
+            content: content.content,
+          });
+        }
+      }
+    }
+  }
+
+  try {
+    const res = await fetch(`${VIEWER_URL}/api/sessions/${viewerSessionId}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: viewerMessages, environment: "agent-test" }),
+    });
+    if (!res.ok) {
+      console.error(`[viewer] Failed to push messages: ${res.status}`);
+    }
+  } catch {
+    // Viewer might not be running — ignore silently
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +328,10 @@ export async function sendPrompt(
   for await (const message of query({ prompt, options: options as Parameters<typeof query>[0]["options"] })) {
     messages.push(message);
   }
+
+  // Push thought chain to session viewer (best-effort, awaited so it completes before process exit)
+  await pushMessagesToViewer(prompt, messages).catch(() => {});
+
   return parseMessages(messages);
 }
 

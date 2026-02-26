@@ -1,11 +1,11 @@
 {
-  "name": "crs-validator-mcp",
+  "name": "digit-mcp",
   "version": "1.0.0",
   "description": "MCP server for CRS/DIGIT validation with progressive disclosure",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "crs-validator-mcp": "./dist/index.js"
+    "digit-mcp": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
@@ -18,10 +18,12 @@
     "test:e2e": "tsx test-e2e-new-tenant.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "pg": "^8.19.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
+    "@types/pg": "^8.16.0",
     "c8": "^11.0.0",
     "tsx": "^4.15.0",
     "typescript": "^5.5.0"

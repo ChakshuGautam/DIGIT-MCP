@@ -172,9 +172,9 @@ Add to `~/.claude/settings.json`:
 ```json
 {
   "mcpServers": {
-    "crs-validator": {
+    "digit-mcp": {
       "command": "node",
-      "args": ["/root/crs-validator-mcp/dist/index.js"],
+      "args": ["/root/DIGIT-MCP/dist/index.js"],
       "env": {
         "CRS_ENVIRONMENT": "local",
         "CRS_USERNAME": "ADMIN",

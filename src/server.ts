@@ -7,6 +7,7 @@ import { ToolRegistry } from './tools/registry.js';
 import { registerAllTools } from './tools/index.js';
 import { ALL_GROUPS } from './types/index.js';
 import { mcpLogger } from './logger.js';
+import { sessionStore } from './services/session-store.js';
 
 export interface CreateServerOptions {
   enableAllGroups?: boolean;
@@ -22,7 +23,7 @@ export function createServer(options?: CreateServerOptions): Server {
 
   const server = new Server(
     {
-      name: 'crs-validator-mcp',
+      name: 'digit-mcp',
       version: '1.0.0',
     },
     {
@@ -48,7 +49,10 @@ export function createServer(options?: CreateServerOptions): Server {
     })),
   }));
 
-  // CallTool — dispatches to handler
+  // Session tools that should not be nudged
+  const SESSION_TOOLS = new Set(['session_checkpoint']);
+
+  // CallTool — dispatches to handler with session tracking
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
@@ -87,16 +91,33 @@ export function createServer(options?: CreateServerOptions): Server {
     }
 
     const start = Date.now();
-    mcpLogger.toolCall(name, (args || {}) as Record<string, unknown>);
+    const sanitizedArgs = (args || {}) as Record<string, unknown>;
+    mcpLogger.toolCall(name, sanitizedArgs);
+
+    // Record tool call in session
+    const seq = sessionStore.recordToolCall(name, sanitizedArgs);
 
     try {
-      const result = await tool.handler((args || {}) as Record<string, unknown>);
-      mcpLogger.toolResult(name, Date.now() - start, false);
+      const result = await tool.handler(sanitizedArgs);
+      const durationMs = Date.now() - start;
+      mcpLogger.toolResult(name, durationMs, false);
+      sessionStore.recordToolResult(seq, name, durationMs, false, result);
+
+      // Nudge: suggest checkpoint after every N non-session tool calls
+      let text = result;
+      if (!SESSION_TOOLS.has(name) && sessionStore.shouldNudgeCheckpoint()) {
+        text += '\n\n---\n**Hint**: Consider calling `session_checkpoint` to record your progress so far.';
+      }
+
       return {
-        content: [{ type: 'text', text: result }],
+        content: [{ type: 'text', text }],
       };
     } catch (error) {
-      mcpLogger.toolResult(name, Date.now() - start, true);
+      const durationMs = Date.now() - start;
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      mcpLogger.toolResult(name, durationMs, true);
+      sessionStore.recordToolResult(seq, name, durationMs, true, '', errorMsg);
+
       return {
         content: [
           {
@@ -104,7 +125,7 @@ export function createServer(options?: CreateServerOptions): Server {
             text: JSON.stringify(
               {
                 success: false,
-                error: error instanceof Error ? error.message : String(error),
+                error: errorMsg,
               },
               null,
               2

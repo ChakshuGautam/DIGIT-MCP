@@ -2,7 +2,7 @@ module.exports = {
   apps: [{
     name: 'digit-mcp',
     script: 'dist/index.js',
-    cwd: '/root/crs-validator-mcp',
+    cwd: '/root/DIGIT-MCP',
     env: {
       MCP_TRANSPORT: 'http',
       MCP_PORT: '3100',
