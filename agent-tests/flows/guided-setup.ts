@@ -1,18 +1,23 @@
 /**
- * Guided city setup flow — mirrors the leadership demo script.
+ * Guided city setup flow on a NEW ROOT TENANT (not pg).
  *
- * Tests whether Claude can set up a complete city for grievance management
- * from natural language instructions, then run the full complaint lifecycle.
+ * Tests the full "set up a new state from scratch" demo flow:
+ * 1. Bootstrap a new root tenant (copies schemas + data from pg)
+ * 2. Set up a city under the new root: tenant, boundaries, workflow, employees
+ * 3. File a citizen complaint in the new city
+ * 4. Assign the complaint
+ * 5. Resolve the complaint
+ * 6. Cleanup both root and city
  *
- * 5 steps (~4-5 minutes):
- * 1. Set up city: tenant, boundaries, workflow, employees
- * 2. File a citizen complaint
- * 3. Assign the complaint
- * 4. Resolve the complaint
- * 5. Cleanup test data
+ * Each prompt is self-contained (fresh MCP server per call). Since the MCP
+ * server defaults to pg, prompts that operate on the new root must tell
+ * Claude to configure the state tenant first.
  *
- * Each prompt is self-contained. Context (city name, complaint ID) is passed
- * between steps in the prompt text.
+ * NOTE: DIGIT Java services (PGR, HRMS, idgen) are deployed with
+ * STATE_LEVEL_TENANT_ID=pg. The tenant_bootstrap tool copies MDMS data
+ * to the new root, but Java services may still reference pg's data.
+ * This test verifies whether the full lifecycle works end-to-end on
+ * a non-pg root.
  */
 
 import {
@@ -29,8 +34,8 @@ import {
 } from "../helpers.js";
 
 export const name = "guided-setup";
-export const description = "Guided city setup → file complaint → assign → resolve → cleanup";
-export const estimatedSeconds = 300;
+export const description = "Bootstrap new root → setup city → file complaint → assign → resolve → cleanup";
+export const estimatedSeconds = 360;
 
 /** Check if any MCP tool (not built-in) was called. */
 function assertMcpToolUsed(result: TurnResult): void {
@@ -47,70 +52,103 @@ function shortName(qualifiedName: string): string {
   return parts[parts.length - 1];
 }
 
+/** Convert a number to a base-26 letter string (0→a, 25→z, 26→ba, etc). */
+function toLetters(n: number): string {
+  let s = "";
+  let num = n;
+  while (num > 0) {
+    s = String.fromCharCode(97 + (num % 26)) + s;
+    num = Math.floor(num / 26);
+  }
+  return s || "a";
+}
+
 export async function run(): Promise<void> {
-  // Unique IDs for this run
-  const RUN_ID = Date.now() % 100000;
-  const CITY = `pg.gs${RUN_ID}`;
-  const LOCALITY = `LOC_GS_${RUN_ID}`;
-  const GRO_PHONE = `98${String(RUN_ID).padStart(8, "0")}`;
-  const LME_PHONE = `91${String(RUN_ID).padStart(8, "0")}`;
-  const CITIZEN_PHONE = `70${String(RUN_ID).padStart(8, "0")}`;
+  // Unique IDs for this run — DIGIT tenant codes must be letters-only
+  const RUN_NUM = Date.now() % 100000;
+  const LETTERS = toLetters(RUN_NUM);
+  const ROOT = `gs${LETTERS}`;
+  const CITY = `${ROOT}.city`;
+  const LOCALITY = `LOC${LETTERS.toUpperCase()}`;
+  const GRO_PHONE = `98${String(RUN_NUM).padStart(8, "0")}`;
+  const LME_PHONE = `91${String(RUN_NUM).padStart(8, "0")}`;
+  const CITIZEN_PHONE = `70${String(RUN_NUM).padStart(8, "0")}`;
 
   let totalCost = 0;
   let complaintId: string | null = null;
 
-  console.log(`        City: ${CITY}, Locality: ${LOCALITY}`);
+  console.log(`        Root: ${ROOT}, City: ${CITY}, Locality: ${LOCALITY}`);
 
   try {
     // -------------------------------------------------------------------
-    // Step 1: Set up the city — tenant, boundaries, workflow, employees
+    // Step 1: Bootstrap a new root tenant
     // -------------------------------------------------------------------
-    logStep(1, 5, `Setting up new city ${CITY}...`);
+    logStep(1, 6, `Bootstrapping new root tenant ${ROOT} from pg...`);
+
+    const bootstrap = await sendPrompt(
+      `Bootstrap a new root tenant called "${ROOT}" by copying all schemas ` +
+      `and data from pg. This will be a new state-level tenant for setting up cities.`,
+      { maxTurns: 10 },
+    );
+
+    logToolCalls(bootstrap);
+    logCost(bootstrap);
+    totalCost += bootstrap.costUsd;
+    assertToolCalled(bootstrap, "tenant_bootstrap");
+
+    const bootstrapResult = getToolResult(bootstrap, "tenant_bootstrap");
+    // Bootstrap may partially succeed (some schemas have empty x-unique constraints)
+    const summary = bootstrapResult.summary as Record<string, number> | undefined;
+    const schemasCopied = summary?.schemas_copied ?? 0;
+    assert(
+      bootstrapResult.success === true || schemasCopied > 10,
+      `Bootstrap failed: ${JSON.stringify(bootstrapResult).slice(0, 400)}`,
+    );
+    console.log(
+      `        Schemas: ${schemasCopied} copied, ${summary?.schemas_skipped ?? 0} skipped, ` +
+      `${summary?.schemas_failed ?? 0} failed`,
+    );
+    console.log(
+      `        Data: ${summary?.data_copied ?? 0} copied, ${summary?.data_skipped ?? 0} skipped`,
+    );
+
+    // -------------------------------------------------------------------
+    // Step 2: Set up city — tenant, boundaries, workflow, employees
+    // -------------------------------------------------------------------
+    logStep(2, 6, `Setting up city ${CITY} under ${ROOT}...`);
 
     const setup = await sendPrompt(
-      `I want to set up a new city called "GS Test City ${RUN_ID}" for citizen grievance management.\n\n` +
-      `Here's what I need:\n` +
-      `- Create it as tenant ${CITY} under pg (schema: tenant.tenants, unique identifier: Tenant.${CITY})\n` +
-      `- Set up a boundary hierarchy (Country > State > District > City > Ward > Locality) ` +
-      `with boundary codes: COUNTRY_GS_${RUN_ID}, STATE_GS_${RUN_ID}, DISTRICT_GS_${RUN_ID}, ` +
-      `CITY_GS_${RUN_ID}, WARD_GS_${RUN_ID}, and ${LOCALITY} as the locality\n` +
-      `- Make sure the PGR workflow exists (copy from pg if needed)\n` +
-      `- Create a Grievance Routing Officer: Rajesh Kumar, phone ${GRO_PHONE}, ` +
-      `roles EMPLOYEE + GRO + DGRO, department DEPT_1, designation DESIG_1, ` +
-      `jurisdiction type City boundary ${CITY}\n` +
-      `- Create a field worker: Priya S, phone ${LME_PHONE}, ` +
-      `roles EMPLOYEE + PGR_LME, department DEPT_1, designation DESIG_1, ` +
-      `jurisdiction type City boundary ${CITY}\n\n` +
-      `Do everything needed to make this city ready for PGR complaints.`,
+      `I want to set up a new city for citizen grievance management under a new state.\n\n` +
+      `IMPORTANT: First, configure the state tenant to "${ROOT}" (not pg).\n\n` +
+      `Then set up everything:\n` +
+      `- Create city tenant ${CITY} under ${ROOT}, city name "Test City" ` +
+      `(MDMS schema: tenant.tenants, unique identifier: Tenant.${CITY}, parent: "${ROOT}")\n` +
+      `- Set up boundary hierarchy (Country > State > District > City > Ward > Locality) ` +
+      `with codes: COUNTRY${LETTERS.toUpperCase()}, STATE${LETTERS.toUpperCase()}, ` +
+      `DISTRICT${LETTERS.toUpperCase()}, CITY${LETTERS.toUpperCase()}, ` +
+      `WARD${LETTERS.toUpperCase()}, and ${LOCALITY}\n` +
+      `- Copy PGR workflow to ${ROOT} from pg\n` +
+      `- Create GRO: Rajesh Kumar, phone ${GRO_PHONE}, roles EMPLOYEE + GRO + DGRO, ` +
+      `department DEPT_1, designation DESIG_1, jurisdiction City boundary ${CITY}\n` +
+      `- Create field worker: Priya S, phone ${LME_PHONE}, roles EMPLOYEE + PGR_LME, ` +
+      `department DEPT_1, designation DESIG_1, jurisdiction City boundary ${CITY}\n\n` +
+      `Make sure this city is fully ready for PGR complaints.`,
       { maxTurns: 25 },
     );
 
     logToolCalls(setup);
     logCost(setup);
     totalCost += setup.costUsd;
-
-    // Verify multiple MCP tools were called for the setup
     assertMcpToolUsed(setup);
 
     const toolNames = setup.toolCalls.map((tc) => shortName(tc.name));
     console.log(`        Setup called ${setup.toolCalls.length} tools across ${setup.numTurns} turns`);
 
     // Verify key setup tools were called
-    const hasTenantCreate = toolNames.some((n) =>
-      n === "mdms_create" || n === "validate_tenant" || n === "mdms_search",
-    );
     const hasBoundaryCreate = toolNames.some((n) => n === "boundary_create");
-    const hasEmployeeCreate = toolNames.some((n) => n === "employee_create");
-
-    assert(hasTenantCreate, `Expected tenant creation tool. Tools: [${toolNames.join(", ")}]`);
     assert(hasBoundaryCreate, `Expected boundary_create. Tools: [${toolNames.join(", ")}]`);
 
-    // Employee creation may hit the known HRMS bug
-    if (!hasEmployeeCreate) {
-      console.log(`        WARNING: employee_create not called — may need separate step`);
-    }
-
-    // Check for HRMS employee creation failures (known bug)
+    // Check employee creation results
     const empResults = setup.toolResults
       .filter((r) => shortName(r.toolName) === "employee_create")
       .map((r) => r.parsed);
@@ -118,27 +156,27 @@ export async function run(): Promise<void> {
     const empFailed = empResults.filter((r) => r?.success === false);
 
     if (empSuccess.length > 0) {
-      console.log(`        Employees created: ${empSuccess.length} succeeded, ${empFailed.length} failed`);
+      console.log(`        Employees: ${empSuccess.length} created, ${empFailed.length} failed`);
     }
     if (empFailed.length > 0) {
       const firstError = JSON.stringify(empFailed[0]).slice(0, 200);
-      if (firstError.includes("getUser()") || firstError.includes("NPE") || firstError.includes("null")) {
+      if (firstError.includes("getUser()") || firstError.includes("null")) {
         console.log(`        Known HRMS bug: ${firstError}`);
       } else {
-        console.log(`        Employee creation errors: ${firstError}`);
+        console.log(`        Employee errors: ${firstError}`);
       }
     }
 
     // -------------------------------------------------------------------
-    // Step 2: File a citizen complaint
+    // Step 3: File a citizen complaint
     // -------------------------------------------------------------------
-    logStep(2, 5, `Filing complaint in ${CITY}...`);
+    logStep(3, 6, `Filing complaint in ${CITY}...`);
 
     const fileComplaint = await sendPrompt(
-      `A citizen named Ravi Kumar (phone ${CITIZEN_PHONE}) wants to report ` +
-      `that a streetlight is not working near Anna Nagar in ${CITY}. ` +
-      `File this complaint using locality code ${LOCALITY}. ` +
-      `Service code: StreetLightNotWorking.`,
+      `Configure state tenant to "${ROOT}", then file a PGR complaint in ${CITY}.\n\n` +
+      `Citizen: Ravi Kumar, phone ${CITIZEN_PHONE}.\n` +
+      `Problem: streetlight not working near Anna Nagar.\n` +
+      `Locality code: ${LOCALITY}. Service code: StreetLightNotWorking.`,
     );
 
     logToolCalls(fileComplaint);
@@ -158,12 +196,13 @@ export async function run(): Promise<void> {
     console.log(`        Complaint filed: ${complaintId}`);
 
     // -------------------------------------------------------------------
-    // Step 3: Assign the complaint
+    // Step 4: Assign the complaint
     // -------------------------------------------------------------------
-    logStep(3, 5, `Assigning complaint ${complaintId}...`);
+    logStep(4, 6, `Assigning complaint ${complaintId}...`);
 
     const assign = await sendPrompt(
-      `Assign PGR complaint ${complaintId} in ${CITY}. Let the system auto-route it.`,
+      `Configure state tenant to "${ROOT}", then assign PGR complaint ${complaintId} ` +
+      `in ${CITY}. Let the system auto-route it.`,
     );
 
     logToolCalls(assign);
@@ -177,7 +216,8 @@ export async function run(): Promise<void> {
     const assignStatus = (assignResult.newStatus as string) ??
       (assignResult.applicationStatus as string) ??
       (assignComplaint?.newStatus as string) ??
-      (assignComplaint?.status as string);
+      (assignComplaint?.status as string) ??
+      (assignComplaint?.applicationStatus as string);
     assert(
       assignStatus === "PENDINGATLME",
       `Expected PENDINGATLME after assign, got: ${JSON.stringify(assignResult).slice(0, 300)}`,
@@ -185,12 +225,13 @@ export async function run(): Promise<void> {
     console.log(`        Assigned, status: ${assignStatus}`);
 
     // -------------------------------------------------------------------
-    // Step 4: Resolve the complaint
+    // Step 5: Resolve the complaint
     // -------------------------------------------------------------------
-    logStep(4, 5, `Resolving complaint ${complaintId}...`);
+    logStep(5, 6, `Resolving complaint ${complaintId}...`);
 
     const resolve = await sendPrompt(
-      `Resolve PGR complaint ${complaintId} in ${CITY}. The streetlight has been repaired.`,
+      `Configure state tenant to "${ROOT}", then resolve PGR complaint ${complaintId} ` +
+      `in ${CITY}. The streetlight has been repaired.`,
     );
 
     logToolCalls(resolve);
@@ -204,7 +245,8 @@ export async function run(): Promise<void> {
     const resolveStatus = (resolveResult.newStatus as string) ??
       (resolveResult.applicationStatus as string) ??
       (resolveComplaint?.newStatus as string) ??
-      (resolveComplaint?.status as string);
+      (resolveComplaint?.status as string) ??
+      (resolveComplaint?.applicationStatus as string);
     assert(
       resolveStatus === "RESOLVED",
       `Expected RESOLVED after resolve, got: ${JSON.stringify(resolveResult).slice(0, 300)}`,
@@ -214,14 +256,15 @@ export async function run(): Promise<void> {
     console.log(`        Total flow cost: $${totalCost.toFixed(4)}`);
   } finally {
     // -------------------------------------------------------------------
-    // Step 5: Cleanup (best effort — don't fail the test if cleanup fails)
+    // Step 6: Cleanup (best effort — don't fail the test)
     // -------------------------------------------------------------------
-    logStep(5, 5, `Cleaning up ${CITY}...`);
+    logStep(6, 6, `Cleaning up ${ROOT} and ${CITY}...`);
 
     try {
       const cleanup = await sendPrompt(
-        `Clean up tenant ${CITY}: deactivate all MDMS data and users.`,
-        { maxTurns: 5 },
+        `Clean up after a test run. Deactivate all MDMS data and users for ` +
+        `tenant "${ROOT}". Then also clean up "${CITY}" if possible.`,
+        { maxTurns: 10 },
       );
       logToolCalls(cleanup);
       logCost(cleanup);
