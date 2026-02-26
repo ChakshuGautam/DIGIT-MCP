@@ -14,7 +14,8 @@
     "dev": "tsx src/index.ts",
     "test": "tsx test-validator.ts",
     "test:ci": "tsx test-integration.ts",
-    "test:full": "c8 --src src --include 'src/**/*.ts' --exclude 'src/index.ts' --exclude 'src/server.ts' --exclude 'src/data/**' --reporter text --reporter text-summary --reporter html tsx test-integration-full.ts"
+    "test:full": "c8 --src src --include 'src/**/*.ts' --exclude 'src/index.ts' --exclude 'src/server.ts' --exclude 'src/data/**' --reporter text --reporter text-summary --reporter html tsx test-integration-full.ts",
+    "test:e2e": "tsx test-e2e-new-tenant.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
