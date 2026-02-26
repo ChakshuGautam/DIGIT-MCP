@@ -7,7 +7,8 @@ const transportMode = process.env.MCP_TRANSPORT === 'http' ? 'http' : 'stdio';
 
 if (transportMode === 'stdio') {
   const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
-  const server = createServer();
+  const enableAll = process.env.MCP_ENABLE_ALL_GROUPS === '1' || process.env.MCP_ENABLE_ALL_GROUPS === 'true';
+  const server = createServer(enableAll ? { enableAllGroups: true } : undefined);
   const transport = new StdioServerTransport();
   server.connect(transport).catch(console.error);
 } else {
