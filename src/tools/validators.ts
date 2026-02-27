@@ -8,7 +8,7 @@ import { digitApi } from '../services/digit-api.js';
  * Input is an unordered array of { boundaryType, parentBoundaryType }.
  * Returns types ordered root-first (e.g. ["Country", "State", "District", ...]).
  */
-function buildOrderedLevels(
+export function buildOrderedLevels(
   hierarchy: { boundaryType: string; parentBoundaryType?: string | null }[]
 ): string[] {
   const childMap = new Map<string, string>();
