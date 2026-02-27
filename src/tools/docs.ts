@@ -1,12 +1,96 @@
 import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
+import { readdir, readFile } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const MCP_ENDPOINT = 'https://docs.digit.org/platform/~gitbook/mcp';
+const LOCAL_URL_PREFIX = 'local://';
+
+// Resolve docs/ directory relative to project root (two levels up from src/tools/)
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DOCS_DIR = join(__dirname, '..', '..', 'docs');
 
 interface McpResult {
   result?: {
     content?: Array<{ type: string; text: string }>;
   };
+}
+
+/**
+ * Search local docs/ directory for markdown files matching a query.
+ * Simple keyword matching on file name + content.
+ */
+async function searchLocalDocs(query: string): Promise<Array<{ title: string; link: string; content: string }>> {
+  const results: Array<{ title: string; link: string; content: string }> = [];
+  const keywords = query.toLowerCase().split(/\s+/).filter(Boolean);
+
+  let files: string[];
+  try {
+    files = await readdir(DOCS_DIR);
+  } catch {
+    return results; // docs/ doesn't exist or isn't readable
+  }
+
+  for (const file of files) {
+    if (!file.endsWith('.md')) continue;
+
+    try {
+      const content = await readFile(join(DOCS_DIR, file), 'utf-8');
+      const lowerContent = content.toLowerCase();
+      const lowerFile = file.toLowerCase();
+
+      // Match if any keyword appears in filename or content
+      const matches = keywords.some(kw => lowerFile.includes(kw) || lowerContent.includes(kw));
+      if (!matches) continue;
+
+      // Extract title from first heading
+      const titleMatch = content.match(/^#\s+(.+)/m);
+      const title = titleMatch ? titleMatch[1] : file.replace('.md', '');
+
+      // Extract a snippet around the first keyword match
+      let snippet = '';
+      for (const kw of keywords) {
+        const idx = lowerContent.indexOf(kw);
+        if (idx >= 0) {
+          const start = Math.max(0, idx - 100);
+          const end = Math.min(content.length, idx + 300);
+          snippet = (start > 0 ? '...' : '') + content.slice(start, end).replace(/\n/g, ' ').trim() + (end < content.length ? '...' : '');
+          break;
+        }
+      }
+
+      results.push({
+        title: `[Local] ${title}`,
+        link: `${LOCAL_URL_PREFIX}${file}`,
+        content: snippet.slice(0, 500),
+      });
+    } catch {
+      // Skip unreadable files
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Read a local doc file by its local:// URL.
+ */
+async function getLocalDoc(localUrl: string): Promise<{ title: string; content: string } | null> {
+  const filename = localUrl.replace(LOCAL_URL_PREFIX, '');
+  // Prevent path traversal
+  if (filename.includes('..') || filename.includes('/')) return null;
+
+  try {
+    const content = await readFile(join(DOCS_DIR, filename), 'utf-8');
+    const titleMatch = content.match(/^#\s+(.+)/m);
+    return {
+      title: titleMatch ? titleMatch[1] : filename.replace('.md', ''),
+      content,
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function searchDocs(query: string): Promise<Array<{ title: string; link: string; content: string }>> {
@@ -69,13 +153,15 @@ export function registerDocsTools(registry: ToolRegistry): void {
     category: 'docs',
     risk: 'read',
     description:
-      'Search the DIGIT documentation (docs.digit.org) for guides, API references, configuration details, architecture docs, and how-to articles. Covers all DIGIT modules: platform, PGR, works, sanitation, health, local governance, and public finance. Returns titles, links, and content snippets.',
+      'Search the DIGIT documentation (docs.digit.org) for guides, API references, configuration details, architecture docs, and how-to articles. ' +
+      'Also searches local docs bundled with this MCP server (UI building guide, API patterns, etc.). ' +
+      'Covers all DIGIT modules: platform, PGR, works, sanitation, health, local governance, and public finance. Returns titles, links, and content snippets.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         query: {
           type: 'string',
-          description: 'Search query (e.g. "persister configuration", "PGR complaint workflow", "MDMS schema setup")',
+          description: 'Search query (e.g. "persister configuration", "PGR complaint workflow", "MDMS schema setup", "UI components", "build PGR frontend")',
         },
       },
       required: ['query'],
@@ -87,9 +173,19 @@ export function registerDocsTools(registry: ToolRegistry): void {
       }
 
       try {
-        const results = await searchDocs(query.trim());
+        // Search both local and remote docs in parallel
+        const [localResults, remoteResults] = await Promise.allSettled([
+          searchLocalDocs(query.trim()),
+          searchDocs(query.trim()),
+        ]);
 
-        if (results.length === 0) {
+        const local = localResults.status === 'fulfilled' ? localResults.value : [];
+        const remote = remoteResults.status === 'fulfilled' ? remoteResults.value : [];
+
+        // Local docs first, then remote
+        const allResults = [...local, ...remote];
+
+        if (allResults.length === 0) {
           return JSON.stringify({
             success: true,
             query,
@@ -102,8 +198,8 @@ export function registerDocsTools(registry: ToolRegistry): void {
         return JSON.stringify({
           success: true,
           query,
-          count: results.length,
-          results: results.map((r, i) => ({
+          count: allResults.length,
+          results: allResults.map((r, i) => ({
             rank: i + 1,
             title: r.title,
             url: r.link,
@@ -127,13 +223,14 @@ export function registerDocsTools(registry: ToolRegistry): void {
     category: 'docs',
     risk: 'read',
     description:
-      'Fetch the full markdown content of a DIGIT documentation page. Use docs_search first to find the URL, then pass it here to read the complete page. Accepts any docs.digit.org URL.',
+      'Fetch the full markdown content of a DIGIT documentation page. Use docs_search first to find the URL, then pass it here to read the complete page. ' +
+      'Accepts docs.digit.org URLs and local:// URLs for bundled docs (e.g. "local://ui.md" for the UI building guide).',
     inputSchema: {
       type: 'object' as const,
       properties: {
         url: {
           type: 'string',
-          description: 'The docs.digit.org page URL (e.g. "https://docs.digit.org/platform/platform/core-services/mdms-v2-master-data-management-service")',
+          description: 'The docs.digit.org page URL (e.g. "https://docs.digit.org/platform/platform/core-services/mdms-v2-master-data-management-service") or a local:// URL (e.g. "local://ui.md")',
         },
       },
       required: ['url'],
@@ -144,11 +241,29 @@ export function registerDocsTools(registry: ToolRegistry): void {
         return JSON.stringify({ success: false, error: 'url is required' });
       }
 
+      // Handle local docs
+      if (url.startsWith(LOCAL_URL_PREFIX)) {
+        const doc = await getLocalDoc(url);
+        if (!doc) {
+          return JSON.stringify({
+            success: false,
+            error: `Local doc not found: ${url}`,
+            hint: 'Use docs_search to find available local docs.',
+          }, null, 2);
+        }
+        return JSON.stringify({
+          success: true,
+          url,
+          title: doc.title,
+          content: doc.content,
+        }, null, 2);
+      }
+
       // Ensure it's a docs.digit.org URL
       if (!url.includes('docs.digit.org')) {
         return JSON.stringify({
           success: false,
-          error: 'URL must be a docs.digit.org page',
+          error: 'URL must be a docs.digit.org page or a local:// URL',
           hint: 'Use docs_search to find valid documentation URLs.',
         });
       }
