@@ -97,7 +97,7 @@ async function loadSessions() {
           <span class="session-time">${relativeTime(s.started_at)}</span>
           <span class="badge badge-${s.transport}">${s.transport}</span>
         </div>
-        <div class="session-env">${escapeHtml(s.environment || 'unknown')}</div>
+        <div class="session-env">${escapeHtml(s.environment || 'unknown')}${s.user_name ? ` &middot; ${escapeHtml(s.user_name)}` : ''}</div>
         <div class="session-stats">
           <span>Tools: ${s.tool_count || 0}</span>
           <span class="${hasErrors ? 'has-errors' : ''}">Err: ${s.error_count || 0}</span>
@@ -136,8 +136,12 @@ async function selectSession(id) {
 
   // Header
   if (session) {
+    const userLine = session.user_name
+      ? `<div class="detail-user"><span>User: <strong>${escapeHtml(session.user_name)}</strong></span>${session.user_purpose ? ` <span>| Purpose: ${escapeHtml(session.user_purpose)}</span>` : ''}</div>`
+      : '';
     $detailHeader.innerHTML = `
       <div class="detail-title">${shortId(session.id)}&hellip;</div>
+      ${userLine}
       <div class="detail-meta">
         <span>Started: ${formatTimestamp(session.started_at)}</span>
         <span>Transport: <span class="badge badge-${session.transport}">${session.transport}</span></span>

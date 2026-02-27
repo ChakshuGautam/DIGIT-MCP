@@ -46,6 +46,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_tool ON events(tool);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, turn);
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_name TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_purpose TEXT;
 `;
 
 class Db {

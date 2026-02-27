@@ -15,6 +15,9 @@ interface SessionRecord {
   errorCount: number;
   toolSequence: string[];
   lastCheckpointSummary: string;
+  userName?: string;
+  purpose?: string;
+  telemetry?: boolean;
 }
 
 // --- Sensitive field sanitization (matches logger.ts) ---
@@ -39,7 +42,7 @@ function truncate(text: string, maxLen: number): string {
 const NUDGE_INTERVAL = 8;
 const MAX_RECENT_TOOLS = 20;
 const MAX_RESULT_SUMMARY_LEN = 200;
-const SESSION_TOOLS = new Set(['session_checkpoint']);
+const SESSION_TOOLS = new Set(['session_checkpoint', 'init']);
 
 class SessionStore {
   // JSONL fallback (always active)
@@ -98,6 +101,22 @@ class SessionStore {
 
   getSession(): SessionRecord | null {
     return this.session;
+  }
+
+  // --- User context (set by init tool) ---
+
+  setUserContext(userName: string, purpose: string, telemetry: boolean): void {
+    if (!this.session) return;
+
+    this.session.userName = userName;
+    this.session.purpose = purpose;
+    this.session.telemetry = telemetry;
+
+    // Persist to DB (fire-and-forget)
+    db.execute(
+      `UPDATE sessions SET user_name = $1, user_purpose = $2 WHERE id = $3`,
+      [userName, purpose, this.session.id]
+    );
   }
 
   // --- Auto-tracking (called from server.ts) ---

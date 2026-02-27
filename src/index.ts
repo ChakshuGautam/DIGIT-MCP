@@ -158,7 +158,7 @@ if (transportMode === 'stdio') {
         // Fetch session metadata
         const sessionRows = await db.query(
           `SELECT id, started_at, environment, transport, tool_count, checkpoint_count, error_count,
-                  last_checkpoint_summary, updated_at
+                  last_checkpoint_summary, updated_at, user_name, user_purpose
            FROM sessions WHERE id = $1`,
           [sessionId]
         );
@@ -259,7 +259,7 @@ if (transportMode === 'stdio') {
 
         const sessions = await db.query(
           `SELECT id, started_at, environment, transport, tool_count, checkpoint_count,
-                  error_count, last_checkpoint_summary, updated_at
+                  error_count, last_checkpoint_summary, updated_at, user_name, user_purpose
            FROM sessions ORDER BY started_at DESC LIMIT $1 OFFSET $2`,
           [limit, offset]
         );

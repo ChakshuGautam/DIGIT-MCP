@@ -1,5 +1,5 @@
 /**
- * Comprehensive integration tests for DIGIT MCP Server — 57 tools, authentic coverage.
+ * Comprehensive integration tests for DIGIT MCP Server — 59 tools, authentic coverage.
  *
  * Hits the real DIGIT API (set CRS_API_URL env var).
  * Tests are STRICT — no error swallowing, no fake assertions.
@@ -15,6 +15,7 @@
 import { ToolRegistry } from './src/tools/registry.js';
 import { registerAllTools } from './src/tools/index.js';
 import { digitApi } from './src/services/digit-api.js';
+import { sessionStore } from './src/services/session-store.js';
 import type { ToolGroup } from './src/types/index.js';
 
 // ════════════════════════════════════════════════════════════════════
@@ -28,10 +29,11 @@ const ALL_TOOL_NAMES: readonly string[] = [
   'configure', 'db_counts', 'decrypt_data', 'discover_tools', 'docs_get', 'docs_search',
   'employee_create', 'employee_update', 'enable_tools', 'encrypt_data',
   'filestore_get_urls', 'filestore_upload', 'get_environment_info', 'health_check',
-  'idgen_generate', 'kafka_lag', 'localization_search', 'localization_upsert', 'location_search',
+  'idgen_generate', 'init', 'kafka_lag', 'localization_search', 'localization_upsert', 'location_search',
   'mdms_create', 'mdms_get_tenants', 'mdms_schema_create', 'mdms_schema_search', 'mdms_search',
   'persister_errors', 'persister_monitor',
   'pgr_create', 'pgr_search', 'pgr_update',
+  'session_checkpoint',
   'tenant_bootstrap', 'tenant_cleanup',
   'trace_debug', 'trace_get', 'trace_search', 'trace_slow', 'tracing_health',
   'user_create', 'user_role_add', 'user_search',
@@ -246,7 +248,7 @@ async function main() {
   console.log('');
   console.log('╔══════════════════════════════════════════════════════════════╗');
   console.log('║   DIGIT MCP Server — Comprehensive Integration Tests       ║');
-  console.log('║   57 tools • STRICT mode • authentic coverage              ║');
+  console.log('║   59 tools • STRICT mode • authentic coverage              ║');
   console.log('╚══════════════════════════════════════════════════════════════╝');
   console.log(`  RUN_ID: ${RUN_ID}  TEST_PREFIX: ${TEST_PREFIX}`);
   console.log('');
@@ -258,6 +260,9 @@ async function main() {
 
   const allGroups: ToolGroup[] = ['core', 'mdms', 'boundary', 'masters', 'employees', 'localization', 'pgr', 'admin', 'idgen', 'location', 'encryption', 'docs', 'monitoring', 'tracing'];
   registry.enableGroups(allGroups);
+
+  // Initialize session for session_checkpoint / init tests
+  await sessionStore.ensureSession('stdio');
 
   const targetEnv = process.env.CRS_ENVIRONMENT || 'chakshu-digit';
 
@@ -372,6 +377,33 @@ async function main() {
     const summary = r.summary as Record<string, number>;
     console.log(`        Services: ${summary.healthy} healthy, ${summary.unhealthy} unhealthy, ${summary.skipped} skipped`);
     return ['health_check'];
+  });
+
+  await test('1.9 init: session initialization with PGR intent', async () => {
+    const r = await call('init', { user_name: 'Test User', purpose: 'set up PGR complaints', telemetry: true });
+    assert(r.success === true, 'init failed');
+    assert(r.session != null, 'should return session info');
+    const session = r.session as Record<string, unknown>;
+    assert(session.userName === 'Test User', 'should record user name');
+    assert(session.purpose === 'set up PGR complaints', 'should record purpose');
+    const groups = r.enabledGroups as string[];
+    assert(groups.includes('pgr'), 'PGR intent should enable pgr group');
+    assert(groups.includes('masters'), 'PGR intent should enable masters group');
+    assert(groups.includes('docs'), 'should always enable docs');
+    const steps = r.suggestedNextSteps as string[];
+    assert(steps.length > 0, 'should have suggested next steps');
+    console.log(`        Session: ${(session.id as string)?.slice(0, 8)}, ${groups.length} groups enabled`);
+    return ['init'];
+  });
+
+  await test('1.10 session_checkpoint', async () => {
+    const r = await call('session_checkpoint', { summary: 'Integration test checkpoint' });
+    assert(r.success === true, 'session_checkpoint failed');
+    const cp = r.checkpoint as Record<string, unknown>;
+    assert(typeof cp.seq === 'number', 'should return sequence number');
+    assert(typeof cp.summary === 'string', 'should return summary');
+    console.log(`        Checkpoint #${cp.seq}: ${cp.summary}`);
+    return ['session_checkpoint'];
   });
 
   // ──────────────────────────────────────────────────────────────────

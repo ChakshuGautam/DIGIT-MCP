@@ -50,7 +50,7 @@ export function createServer(options?: CreateServerOptions): Server {
   }));
 
   // Session tools that should not be nudged
-  const SESSION_TOOLS = new Set(['session_checkpoint']);
+  const SESSION_TOOLS = new Set(['session_checkpoint', 'init']);
 
   // CallTool — dispatches to handler with session tracking
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
