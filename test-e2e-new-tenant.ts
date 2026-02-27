@@ -273,76 +273,22 @@ async function main() {
     return ['mdms_schema_search'];
   });
 
-  // 7. Create city tenant record under pg
-  await testWithDeps('7 create city tenant under pg', ['6 verify tenant schema on pg'], async () => {
-    const existing = await call('mdms_search', {
-      tenant_id: 'pg',
-      schema_code: 'tenant.tenants',
-      unique_identifiers: [state.cityTenant],
-    });
-    if (existing.success && (existing.count as number) > 0) {
-      console.log(`        City tenant ${state.cityTenant} already exists`);
-      return ['mdms_search'];
-    }
-
-    // City code for idgen: extract part after "pg." and uppercase it
-    const cityCode = state.cityTenant.split('.')[1]!.toUpperCase();
-    const r = await call('mdms_create', {
-      tenant_id: 'pg',
-      schema_code: 'tenant.tenants',
-      unique_identifier: `Tenant.${state.cityTenant}`,
-      data: {
-        code: state.cityTenant,
-        name: `E2E City ${RUN_ID}`,
-        tenantId: state.cityTenant,
-        parent: 'pg',
-        city: {
-          code: cityCode,
-          name: `E2E City ${RUN_ID}`,
-        },
-      },
-    });
-    assert(r.success === true, `mdms_create city tenant failed: ${r.error}`);
-    console.log(`        Created city tenant: ${state.cityTenant}`);
-    return ['mdms_create'];
-  });
-
-  // 8. Create boundary hierarchy + entities
-  await testWithDeps('8 create boundary hierarchy + entities', ['7 create city tenant under pg'], async () => {
-    const r = await call('boundary_create', {
+  // 7. Set up city via city_setup (replaces manual tenant create + boundary create + workflow copy)
+  await testWithDeps('7 city_setup', ['6 verify tenant schema on pg'], async () => {
+    const r = await call('city_setup', {
       tenant_id: state.cityTenant,
-      hierarchy_definition: ['Country', 'State', 'District', 'City', 'Ward', 'Locality'],
-      boundaries: [
-        { code: `COUNTRY_${RUN_ID}`, type: 'Country' },
-        { code: `STATE_${RUN_ID}`, type: 'State', parent: `COUNTRY_${RUN_ID}` },
-        { code: `DISTRICT_${RUN_ID}`, type: 'District', parent: `STATE_${RUN_ID}` },
-        { code: `CITY_${RUN_ID}`, type: 'City', parent: `DISTRICT_${RUN_ID}` },
-        { code: `WARD_${RUN_ID}`, type: 'Ward', parent: `CITY_${RUN_ID}` },
-        { code: state.localityCode, type: 'Locality', parent: `WARD_${RUN_ID}` },
-      ],
+      city_name: `E2E City ${RUN_ID}`,
+      source_tenant: 'pg',
+      locality_codes: [state.localityCode],
     });
-    const summary = r.summary as Record<string, number> | undefined;
-    const created = (summary?.entitiesCreated ?? 0) + (summary?.entitiesSkipped ?? 0);
-    assert(created >= 6, `boundary_create should create/skip >=6 entities, got ${created}: ${r.error}`);
-    console.log(`        Entities: ${summary?.entitiesCreated ?? 0} created, ${summary?.entitiesSkipped ?? 0} skipped`);
-    console.log(`        Relationships: ${summary?.relationshipsCreated ?? 0} created`);
-    return ['boundary_create'];
+    assert(r.success === true, `city_setup failed: ${r.error}`);
+    const steps = r.steps as Record<string, unknown>;
+    console.log(`        ${JSON.stringify(steps)}`);
+    return ['city_setup'];
   });
 
-  // 8. Copy PGR workflow (idempotent — pg already has it, but verifies the tool works)
-  await testWithDeps('9 copy PGR workflow', ['1 configure + login'], async () => {
-    const r = await call('workflow_create', {
-      tenant_id: 'pg',
-      copy_from_tenant: 'pg',
-    });
-    assert(r.success === true, `workflow_create failed: ${r.error}`);
-    const summary = r.summary as Record<string, number>;
-    console.log(`        Created: ${summary.created}, Skipped: ${summary.skipped}`);
-    return ['workflow_create'];
-  });
-
-  // 9. Verify PGR workflow
-  await testWithDeps('10 verify PGR workflow', ['9 copy PGR workflow'], async () => {
+  // 8. Verify PGR workflow
+  await testWithDeps('8 verify PGR workflow', ['7 city_setup'], async () => {
     const r = await call('workflow_business_services', {
       tenant_id: state.cityTenant,
       business_services: ['PGR'],
@@ -353,8 +299,8 @@ async function main() {
     return ['workflow_business_services'];
   });
 
-  // 10. Verify complaint types
-  await testWithDeps('11 verify complaint types', ['1 configure + login'], async () => {
+  // 9. Verify complaint types
+  await testWithDeps('9 verify complaint types', ['1 configure + login'], async () => {
     const r = await call('validate_complaint_types', { tenant_id: state.cityTenant });
     assert(r.success === true, `validate_complaint_types failed: ${r.error}`);
     const validation = r.validation as Record<string, unknown>;
@@ -362,10 +308,10 @@ async function main() {
     return ['validate_complaint_types'];
   });
 
-  // 11. Create GRO+LME employee on new city
+  // 10. Create GRO+LME employee on new city
   const empMobile = `91${String(RUN_ID).padStart(8, '0')}`;
 
-  await testWithDeps('12 create GRO+LME employee', ['8 create boundary hierarchy + entities'], async () => {
+  await testWithDeps('10 create GRO+LME employee', ['7 city_setup'], async () => {
     const r = await call('employee_create', {
       tenant_id: state.cityTenant,
       name: `E2E Employee ${RUN_ID}`,
@@ -382,7 +328,7 @@ async function main() {
     });
     const isHrmsBug = !r.success && ((r.error as string) || '').includes('getUser()');
     if (isHrmsBug) {
-      markKnownBug('12 create GRO+LME employee', 'HRMS employee_create NPE on getUser() — server-side bug');
+      markKnownBug('10 create GRO+LME employee', 'HRMS employee_create NPE on getUser() — server-side bug');
       return ['employee_create'];
     }
     assert(r.success === true, `employee_create failed: ${r.error}`);
@@ -394,8 +340,8 @@ async function main() {
     return ['employee_create'];
   });
 
-  // 12. Validate employees on new city
-  await testWithDeps('13 validate employees', ['12 create GRO+LME employee'], async () => {
+  // 11. Validate employees on new city
+  await testWithDeps('11 validate employees', ['10 create GRO+LME employee'], async () => {
     await wait(3000, 'HRMS indexing');
     const r = await call('validate_employees', {
       tenant_id: state.cityTenant,
@@ -412,8 +358,8 @@ async function main() {
   // ──────────────────────────────────────────────────────────────────
   console.log('\n── Phase 3: PGR Lifecycle ──');
 
-  // 13. Create PGR complaint
-  await testWithDeps('14 create PGR complaint', ['10 verify PGR workflow', '11 verify complaint types', '12 create GRO+LME employee'], async () => {
+  // 12. Create PGR complaint
+  await testWithDeps('12 create PGR complaint', ['8 verify PGR workflow', '9 verify complaint types', '10 create GRO+LME employee'], async () => {
     const r = await call('pgr_create', {
       tenant_id: state.cityTenant,
       service_code: 'StreetLightNotWorking',
@@ -430,8 +376,8 @@ async function main() {
     return ['pgr_create'];
   });
 
-  // 14. Search for complaint (with retry for eventual consistency)
-  await testWithDeps('15 search for complaint', ['14 create PGR complaint'], async () => {
+  // 13. Search for complaint (with retry for eventual consistency)
+  await testWithDeps('13 search for complaint', ['12 create PGR complaint'], async () => {
     const found = await waitForCondition(async () => {
       const r = await call('pgr_search', {
         tenant_id: state.cityTenant,
@@ -444,8 +390,8 @@ async function main() {
     return ['pgr_search'];
   });
 
-  // 15. ASSIGN complaint (auto-route — don't specify assignees, PGR HRMS lookup is misconfigured)
-  await testWithDeps('16 ASSIGN complaint', ['15 search for complaint'], async () => {
+  // 14. ASSIGN complaint (auto-route — don't specify assignees, PGR HRMS lookup is misconfigured)
+  await testWithDeps('14 ASSIGN complaint', ['13 search for complaint'], async () => {
     await wait(2000, 'PGR workflow settling');
     const r = await call('pgr_update', {
       tenant_id: state.cityTenant,
@@ -458,8 +404,8 @@ async function main() {
     return ['pgr_update'];
   });
 
-  // 16. RESOLVE complaint
-  await testWithDeps('17 RESOLVE complaint', ['16 ASSIGN complaint'], async () => {
+  // 15. RESOLVE complaint
+  await testWithDeps('15 RESOLVE complaint', ['14 ASSIGN complaint'], async () => {
     await wait(2000, 'PGR ASSIGN settling');
     const r = await call('pgr_update', {
       tenant_id: state.cityTenant,
@@ -472,8 +418,8 @@ async function main() {
     return ['pgr_update'];
   });
 
-  // 17. RATE complaint (as citizen)
-  await testWithDeps('18 RATE complaint as citizen', ['17 RESOLVE complaint'], async () => {
+  // 16. RATE complaint (as citizen)
+  await testWithDeps('16 RATE complaint as citizen', ['15 RESOLVE complaint'], async () => {
     await wait(2000, 'PGR RESOLVE settling');
     try {
       // Login as citizen (mobile number is the username, pgr_create auto-creates the user)
@@ -505,8 +451,8 @@ async function main() {
     return ['pgr_update', 'configure'];
   });
 
-  // 18. Verify workflow final state
-  await testWithDeps('19 verify workflow final state', ['18 RATE complaint as citizen'], async () => {
+  // 17. Verify workflow final state
+  await testWithDeps('17 verify workflow final state', ['16 RATE complaint as citizen'], async () => {
     const r = await call('workflow_process_search', {
       tenant_id: state.cityTenant,
       business_ids: [state.complaintId!],
@@ -529,8 +475,8 @@ async function main() {
   // ──────────────────────────────────────────────────────────────────
   console.log('\n── Phase 4: Cleanup ──');
 
-  // 19. Cleanup bootstrap root
-  await testWithDeps('20 cleanup bootstrap root', ['2 bootstrap new root tenant'], async () => {
+  // 18. Cleanup bootstrap root
+  await testWithDeps('18 cleanup bootstrap root', ['2 bootstrap new root tenant'], async () => {
     const r = await call('tenant_cleanup', {
       tenant_id: state.bootstrapRoot,
       deactivate_users: true,
@@ -541,8 +487,8 @@ async function main() {
     return ['tenant_cleanup'];
   });
 
-  // 20. Verify bootstrap cleanup
-  await testWithDeps('21 verify bootstrap cleanup', ['20 cleanup bootstrap root'], async () => {
+  // 19. Verify bootstrap cleanup
+  await testWithDeps('19 verify bootstrap cleanup', ['18 cleanup bootstrap root'], async () => {
     await wait(3000, 'MDMS cleanup propagation');
     const r = await waitForCondition(async () => {
       const res = await call('mdms_search', {
