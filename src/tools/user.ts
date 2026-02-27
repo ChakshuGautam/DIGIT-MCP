@@ -261,6 +261,10 @@ export function registerUserTools(registry: ToolRegistry): void {
           items: { type: 'string' },
           description: 'Role codes to add (default: ["CITIZEN","EMPLOYEE","CSR","GRO","PGR_LME","DGRO","SUPERUSER"] — standard PGR roles)',
         },
+        city_level: {
+          type: 'boolean',
+          description: 'If true, tag roles to the exact tenant ID passed (e.g. "mz.chimoio") instead of auto-resolving to the state root ("mz"). Use this when roles need to be scoped to a specific city tenant.',
+        },
       },
       required: ['tenant_id'],
     },
@@ -268,7 +272,8 @@ export function registerUserTools(registry: ToolRegistry): void {
       await ensureAuthenticated();
 
       const targetTenant = args.tenant_id as string;
-      const rootTenant = targetTenant.includes('.') ? targetTenant.split('.')[0] : targetTenant;
+      const cityLevel = args.city_level === true;
+      const rootTenant = cityLevel ? targetTenant : (targetTenant.includes('.') ? targetTenant.split('.')[0] : targetTenant);
 
       // Determine which user to update
       const authInfo = digitApi.getAuthInfo();
