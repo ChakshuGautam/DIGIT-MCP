@@ -73,7 +73,7 @@ function preflight(): boolean {
       console.log(`${C.green}OK${C.reset}: MCP server built successfully`);
     } catch {
       console.error(
-        `${C.red}ERROR${C.reset}: Failed to build MCP server. Run 'npm run build' in /root/crs-validator-mcp`,
+        `${C.red}ERROR${C.reset}: Failed to build MCP server. Run 'npm run build' in /root/DIGIT-MCP`,
       );
       ok = false;
     }

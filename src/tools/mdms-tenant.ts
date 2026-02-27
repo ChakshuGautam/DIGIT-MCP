@@ -675,7 +675,7 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
     description:
       'Bootstrap a new state-level tenant root by copying ALL schemas and essential MDMS data from an existing tenant (e.g. "pg"). ' +
       'This is REQUIRED before creating employees, PGR complaints, or any service under a new tenant root. ' +
-      'Copies: all schema definitions, IdFormat records, Department records, Designation records, and StateInfo. ' +
+      'Copies: all schema definitions, IdFormat records, Department records, Designation records, StateInfo, and InboxQueryConfiguration. ' +
       'Also provisions an ADMIN user on the new tenant so that direct API login with tenantId=<new-root> works from frontends. ' +
       'Call this ONCE when you create a new tenant root (e.g. "tenant", "ke") before doing anything else under it.',
     inputSchema: {
@@ -760,6 +760,12 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         // enough for user provisioning; role-action mappings are shared via access-control service.
         'common-masters.IdFormat',
         'common-masters.Department',
+        // DataSecurity schemas — required by services that embed egov-enc-service (inbox, PGR, user).
+        // Without these, the encryption policy @PostConstruct init fails and the service won't start.
+        'DataSecurity.DecryptionABAC',
+        'DataSecurity.EncryptionPolicy',
+        'DataSecurity.SecurityPolicy',
+        'DataSecurity.MaskingPatterns',
         'common-masters.Designation',
         'common-masters.StateInfo',
         'common-masters.GenderType',
@@ -768,6 +774,7 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         'egov-hrms.DeactivationReason',
         'RAINMAKER-PGR.ServiceDefs',
         'Workflow.BusinessService',
+        'INBOX.InboxQueryConfiguration',
       ];
 
       for (const schemaCode of essentialSchemas) {
@@ -835,6 +842,10 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           { code: 'PGR_LME', name: 'PGR Last Mile Employee' },
           { code: 'DGRO', name: 'Department GRO' },
           { code: 'SUPERUSER', name: 'Super User' },
+          // INTERNAL_MICROSERVICE_ROLE — required by services that do inter-service user lookups
+          // (e.g. inbox's ElasticSearchService.initializeSystemuser() searches for a user with this
+          // role on the state tenant). Without it, inbox crashes: "Service returned null while fetching user".
+          { code: 'INTERNAL_MICROSERVICE_ROLE', name: 'Internal Microservice Role' },
         ].map((r) => ({ ...r, tenantId: target }));
 
         // Check if user already exists on the target tenant

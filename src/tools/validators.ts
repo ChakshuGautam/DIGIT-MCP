@@ -618,7 +618,11 @@ export function registerValidatorTools(registry: ToolRegistry): void {
     description:
       'Create boundary hierarchy and entities from JSON. No Excel file needed — calls boundary-service APIs directly. ' +
       'Three-step process: (1) create hierarchy definition if needed, (2) create boundary entities, (3) create parent-child relationships. ' +
-      'Accepts a flat list of boundaries with their type and parent code. Processes them top-down.',
+      'Accepts a flat list of boundaries with their type and parent code. Processes them top-down. ' +
+      'TIP: For real-world boundary data (India, Mozambique, etc.), clone https://github.com/ChakshuGautam/DIGIT-Boundaries-OpenData into a temp directory ' +
+      '(e.g. `git clone https://github.com/ChakshuGautam/DIGIT-Boundaries-OpenData /tmp/digit-boundaries`) — ' +
+      'it has pre-generated hierarchy definitions and boundary lists in DIGIT-compatible format (boundaries-flat.json, boundary-relationships.json) ' +
+      'organized by country/state/city (data/{COUNTRY}/{STATE}/{CITY}/). Read the JSON files and pass them directly to this tool instead of manually constructing boundary lists.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -737,6 +741,32 @@ export function registerValidatorTools(registry: ToolRegistry): void {
             error: `Failed to fetch hierarchy: ${error instanceof Error ? error.message : String(error)}`,
             hint: 'Provide hierarchy_definition parameter to create one.',
           }, null, 2);
+        }
+      }
+
+      // Step 1b: Ensure hierarchy also exists at the state root tenant.
+      // The DIGIT UI queries boundaries at the state level (e.g. tenantId=mz)
+      // even when boundaries are defined at city level (e.g. mz.chimoio).
+      // Without a hierarchy definition at the root, the boundary-service
+      // returns HIERARCHY_DEFINITION_DOES_NOT_EXIST_ERR.
+      const stateRoot = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
+      if (stateRoot !== tenantId && hierarchyLevels.length > 0) {
+        try {
+          const rootLevels = hierarchyLevels.map((type, i) => ({
+            boundaryType: type,
+            parentBoundaryType: i === 0 ? null : hierarchyLevels[i - 1],
+            active: true,
+          }));
+          await digitApi.boundaryHierarchyCreate(stateRoot, hierarchyType, rootLevels);
+          (results.hierarchy as Record<string, unknown>).rootCreated = stateRoot;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes('DUPLICATE') || msg.includes('already exists') || msg.includes('unique')) {
+            (results.hierarchy as Record<string, unknown>).rootCreated = `${stateRoot} (already exists)`;
+          } else {
+            // Non-fatal — log but continue
+            console.error(`[boundary_create] Failed to create hierarchy at state root ${stateRoot}: ${msg}`);
+          }
         }
       }
 
