@@ -987,26 +987,26 @@ function buildPaths(): Record<string, Record<string, unknown>> {
         tags: ['Workflow'],
         operationId: 'workflowProcessSearch',
         summary: 'Search workflow process instances (audit trail)',
-        description: 'Returns the workflow transition history for specific business IDs (e.g. PGR complaint numbers). Shows who did what and when.',
+        description:
+          'Returns the workflow transition history for specific business IDs (e.g. PGR complaint numbers). ' +
+          'Shows who did what and when. NOTE: tenantId, businessIds, and history must be passed as query params, not in the body. ' +
+          'Set history=true to get the full audit trail (all transitions); without it only the latest transition is returned.',
+        parameters: [
+          { name: 'tenantId', in: 'query' as const, required: true, schema: { type: 'string' as const } },
+          { name: 'businessIds', in: 'query' as const, schema: { type: 'string' as const }, description: 'Comma-separated business IDs (e.g. PGR service request IDs)' },
+          { name: 'history', in: 'query' as const, schema: { type: 'boolean' as const, default: false }, description: 'If true, returns all process instances (full audit trail). If false, returns only the latest.' },
+          { name: 'limit', in: 'query' as const, schema: { type: 'integer' as const, default: 50 } },
+          { name: 'offset', in: 'query' as const, schema: { type: 'integer' as const, default: 0 } },
+        ],
         requestBody: {
           required: true,
           content: {
             'application/json': {
               schema: {
                 type: 'object',
-                required: ['RequestInfo', 'criteria'],
+                required: ['RequestInfo'],
                 properties: {
                   RequestInfo: { $ref: '#/components/schemas/RequestInfo' },
-                  criteria: {
-                    type: 'object',
-                    required: ['tenantId'],
-                    properties: {
-                      tenantId: { type: 'string' },
-                      businessIds: { type: 'array', items: { type: 'string' }, description: 'Business IDs (e.g. PGR service request IDs)' },
-                      limit: { type: 'integer', default: 50 },
-                      offset: { type: 'integer', default: 0 },
-                    },
-                  },
                 },
               },
             },

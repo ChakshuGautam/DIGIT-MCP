@@ -584,7 +584,7 @@ class DigitApiClient {
           tenantId,
           serviceCode,
           description,
-          address: { tenantId, geoLocation: {}, ...address },
+          address: { tenantId, geoLocation: { latitude: 0, longitude: 0 }, ...address },
           citizen: citizenInfo,
           source: 'web',
           active: true,
@@ -660,13 +660,15 @@ class DigitApiClient {
   }
 
   // Workflow process instance search — tenantId and businessIds as query params
+  // history=true returns full audit trail; without it only the latest transition is returned
   async workflowProcessSearch(
     tenantId: string,
     businessIds?: string[],
-    options?: { limit?: number; offset?: number; moduleName?: string }
+    options?: { limit?: number; offset?: number; moduleName?: string; history?: boolean }
   ): Promise<Record<string, unknown>[]> {
     const params = new URLSearchParams({ tenantId });
     if (businessIds?.length) params.append('businessIds', businessIds.join(','));
+    params.append('history', String(options?.history ?? true));
     params.append('limit', String(options?.limit || 50));
     params.append('offset', String(options?.offset || 0));
 
