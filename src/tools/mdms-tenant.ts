@@ -3,6 +3,7 @@ import { MDMS_SCHEMAS } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
 import { ENVIRONMENTS } from '../config/environments.js';
+import { buildOrderedLevels } from './validators.js';
 
 /**
  * Search for MDMS records across all state tenants.
@@ -70,6 +71,87 @@ async function searchAllStateTenants(
   }
 
   return allResults;
+}
+
+/**
+ * Copy workflow business service definitions from one tenant root to another.
+ * Reusable by both tenant_bootstrap and city_setup.
+ */
+async function copyWorkflowDefinitions(
+  sourceRoot: string,
+  targetRoot: string,
+): Promise<{ created: string[]; skipped: string[]; failed: string[] }> {
+  const results = { created: [] as string[], skipped: [] as string[], failed: [] as string[] };
+
+  const knownServices = ['PGR', 'PT.CREATE', 'PT.UPDATE', 'NewTL', 'NewWS1', 'NewSW1', 'FSM', 'BPAREG', 'BPA'];
+  const sourceServices = await digitApi.workflowBusinessServiceSearch(sourceRoot, knownServices);
+  if (sourceServices.length === 0) {
+    results.failed.push(`No workflow services found in source "${sourceRoot}"`);
+    return results;
+  }
+
+  const buildStateMap = (states: Record<string, unknown>[]): Map<string, string> => {
+    const map = new Map<string, string>();
+    for (const s of states) {
+      if (s.uuid && s.state) map.set(s.uuid as string, s.state as string);
+    }
+    return map;
+  };
+
+  for (const bs of sourceServices) {
+    const bsCode = bs.businessService as string;
+    try {
+      const existing = await digitApi.workflowBusinessServiceSearch(targetRoot, [bsCode]);
+      if (existing.length > 0) {
+        results.skipped.push(bsCode);
+        continue;
+      }
+
+      const sourceStates = (bs.states || []) as Record<string, unknown>[];
+      const stateMap = buildStateMap(sourceStates);
+
+      const cleanStates = sourceStates.map((s) => ({
+        state: s.state,
+        applicationStatus: s.applicationStatus,
+        docUploadRequired: s.docUploadRequired,
+        isStartState: s.isStartState,
+        isTerminateState: s.isTerminateState,
+        isStateUpdatable: s.isStateUpdatable,
+        actions: ((s.actions || []) as Record<string, unknown>[]).map((a) => {
+          const nextState = a.nextState as string;
+          const resolvedNext = stateMap.get(nextState) || nextState;
+          return {
+            action: a.action,
+            nextState: resolvedNext,
+            roles: a.roles,
+            active: a.active,
+          };
+        }),
+      }));
+
+      const result = await digitApi.workflowBusinessServiceCreate(targetRoot, {
+        businessService: bsCode,
+        business: bs.business,
+        businessServiceSla: bs.businessServiceSla,
+        states: cleanStates,
+      });
+
+      if (result.uuid || result.businessService) {
+        results.created.push(bsCode);
+      } else {
+        results.failed.push(`${bsCode}: API returned 200 but no data`);
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes('DUPLICATE') || msg.includes('already exists') || msg.includes('unique')) {
+        results.skipped.push(bsCode);
+      } else {
+        results.failed.push(`${bsCode}: ${msg}`);
+      }
+    }
+  }
+
+  return results;
 }
 
 export function registerMdmsTenantTools(registry: ToolRegistry): void {
@@ -676,7 +758,8 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       'Bootstrap a new state-level tenant root by copying ALL schemas and essential MDMS data from an existing tenant (e.g. "pg"). ' +
       'This is REQUIRED before creating employees, PGR complaints, or any service under a new tenant root. ' +
       'Copies: all schema definitions, IdFormat records, Department records, Designation records, StateInfo, and InboxQueryConfiguration. ' +
-      'Also provisions an ADMIN user on the new tenant so that direct API login with tenantId=<new-root> works from frontends. ' +
+      'Also provisions an ADMIN user on the new tenant and copies workflow definitions (PGR, etc.) from source. ' +
+      'After bootstrap, use city_setup to create city-level tenants. ' +
       'Call this ONCE when you create a new tenant root (e.g. "tenant", "ke") before doing anything else under it.',
     inputSchema: {
       type: 'object' as const,
@@ -909,6 +992,14 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         userProvisionError = msg;
       }
 
+      // Step 5: Copy workflow definitions
+      let workflowResults = { created: [] as string[], skipped: [] as string[], failed: [] as string[] };
+      try {
+        workflowResults = await copyWorkflowDefinitions(source, target);
+      } catch (err) {
+        workflowResults.failed.push(`workflow copy error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
       return JSON.stringify({
         success: results.schemas.failed.length === 0 && results.data.failed.length === 0,
         source,
@@ -920,6 +1011,9 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           data_copied: results.data.copied.length,
           data_skipped: results.data.skipped.length,
           data_failed: results.data.failed.length,
+          workflows_created: workflowResults.created.length,
+          workflows_skipped: workflowResults.skipped.length,
+          workflows_failed: workflowResults.failed.length,
         },
         ...(userProvisioned && {
           adminUser: {
@@ -937,7 +1031,395 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
             hint: 'User provisioning failed. You can manually create an ADMIN user with user_create tool.',
           },
         }),
-        results,
+        results: {
+          ...results,
+          workflow: workflowResults,
+        },
+        nextSteps: [
+          `Create a city tenant: use city_setup with tenant_id="${target}.yourcity" and a city name`,
+          'NOTE: DIGIT Java services (PGR, HRMS, inbox) use STATE_LEVEL_TENANT_ID from their config. ' +
+          'A new root tenant requires restarting these services. For testing, create cities under "pg" instead.',
+        ],
+      }, null, 2);
+    },
+  } satisfies ToolMetadata);
+
+  // city_setup — set up a city-level tenant with everything needed for PGR
+  registry.register({
+    name: 'city_setup',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'write',
+    description:
+      'Set up a city-level tenant under an existing root with everything needed for PGR. ' +
+      'Creates tenant record, provisions dual-scoped ADMIN user, copies workflow definitions, and creates boundary hierarchy. ' +
+      'Call tenant_bootstrap first to set up the root.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'City tenant ID e.g. "pg.newcity"',
+        },
+        city_name: {
+          type: 'string',
+          description: 'Human-readable city name',
+        },
+        source_tenant: {
+          type: 'string',
+          description: 'Source for workflow copy (default: root tenant, falls back to "pg")',
+        },
+        create_boundaries: {
+          type: 'boolean',
+          description: 'Create default boundary hierarchy (default: true)',
+        },
+        locality_codes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Custom locality codes. Default: auto-generated LOC_<CITYCODE>_1',
+        },
+      },
+      required: ['tenant_id', 'city_name'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const cityName = args.city_name as string;
+      const sourceArg = args.source_tenant as string | undefined;
+      const createBoundaries = (args.create_boundaries as boolean) ?? true;
+      const localityCodes = args.locality_codes as string[] | undefined;
+
+      // Validate city-level tenant ID
+      if (!tenantId.includes('.')) {
+        return JSON.stringify({
+          success: false,
+          error: `tenant_id "${tenantId}" must be a city-level ID containing a dot (e.g. "pg.newcity"). ` +
+            'Use tenant_bootstrap for state-level root tenants.',
+        }, null, 2);
+      }
+
+      const root = tenantId.split('.')[0];
+      const cityCode = tenantId.split('.').slice(1).join('.').toUpperCase().replace(/\./g, '_');
+
+      const steps: Record<string, unknown> = {};
+
+      // Step 1: Validate root tenant exists
+      try {
+        const rootTenants = await digitApi.mdmsV2SearchRaw(root, 'tenant.tenants', {
+          uniqueIdentifiers: [root],
+          limit: 1,
+        });
+        if (rootTenants.length === 0) {
+          // Also check if root exists in pg's MDMS (multi-root setup)
+          const pgTenants = await digitApi.mdmsV2SearchRaw('pg', 'tenant.tenants', {
+            uniqueIdentifiers: [root],
+            limit: 1,
+          });
+          if (pgTenants.length === 0 && root !== 'pg') {
+            return JSON.stringify({
+              success: false,
+              error: `Root tenant "${root}" not found. Run tenant_bootstrap with target_tenant="${root}" first.`,
+            }, null, 2);
+          }
+        }
+      } catch (err) {
+        // If root MDMS search fails, root likely doesn't exist
+        if (root !== 'pg') {
+          return JSON.stringify({
+            success: false,
+            error: `Root tenant "${root}" not accessible: ${err instanceof Error ? err.message : String(err)}. ` +
+              `Run tenant_bootstrap with target_tenant="${root}" first.`,
+          }, null, 2);
+        }
+      }
+
+      // Step 2: Create city tenant MDMS record
+      try {
+        const existing = await digitApi.mdmsV2SearchRaw(root, 'tenant.tenants', {
+          uniqueIdentifiers: [`Tenant.${tenantId}`],
+          limit: 1,
+        });
+        if (existing.length > 0 && existing[0].isActive) {
+          steps.tenantRecord = 'already_exists';
+        } else if (existing.length > 0 && !existing[0].isActive) {
+          await digitApi.mdmsV2Update(existing[0], true);
+          steps.tenantRecord = 'reactivated';
+        } else {
+          await digitApi.mdmsV2Create(root, 'tenant.tenants', `Tenant.${tenantId}`, {
+            code: tenantId,
+            name: cityName,
+            tenantId,
+            parent: root,
+            city: {
+              code: cityCode,
+              name: cityName,
+              districtName: root,
+            },
+          });
+          steps.tenantRecord = 'created';
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('DUPLICATE') || msg.includes('already exists') || msg.includes('unique') || msg.includes('NON_UNIQUE')) {
+          steps.tenantRecord = 'already_exists';
+        } else {
+          return JSON.stringify({
+            success: false,
+            error: `Failed to create city tenant record: ${msg}`,
+            hint: `Ensure root "${root}" has tenant.tenants schema with x-unique. Run tenant_bootstrap if needed.`,
+          }, null, 2);
+        }
+      }
+
+      // Step 3: Provision dual-scoped ADMIN user
+      const adminUserResult: { provisioned: boolean; dualScoped: boolean; rolesAdded: number; error?: string } = {
+        provisioned: false,
+        dualScoped: false,
+        rolesAdded: 0,
+      };
+      try {
+        const auth = digitApi.getAuthInfo();
+        const currentUsername = auth.user?.userName || process.env.CRS_USERNAME || 'ADMIN';
+        const currentPassword = process.env.CRS_PASSWORD || 'eGov@123';
+
+        const standardRoles = ['EMPLOYEE', 'CITIZEN', 'CSR', 'GRO', 'PGR_LME', 'DGRO', 'SUPERUSER', 'INTERNAL_MICROSERVICE_ROLE'];
+
+        // Build dual-scoped roles (both root and city)
+        const dualRoles = standardRoles.flatMap(code => [
+          { code, name: code, tenantId: root },
+          { code, name: code, tenantId: tenantId },
+        ]);
+
+        // Search for ADMIN user on root tenant
+        const sourceTenantForSearch = auth.user?.tenantId || root;
+        const rootUsers = await digitApi.userSearch(sourceTenantForSearch, {
+          userName: currentUsername,
+          limit: 1,
+        });
+
+        const sourceUser = rootUsers[0];
+        const userName = (sourceUser?.userName as string) || currentUsername;
+        const name = (sourceUser?.name as string) || 'Admin';
+        const mobileNumber = (sourceUser?.mobileNumber as string) || '9999999999';
+
+        // Check if user exists on city tenant
+        let userOnCity: Record<string, unknown> | null = null;
+        try {
+          const cityUsers = await digitApi.userSearch(tenantId, { userName: userName, limit: 1 });
+          if (cityUsers.length > 0) userOnCity = cityUsers[0];
+        } catch (_) {
+          // City user search may fail if city tenant is brand new
+        }
+
+        if (userOnCity) {
+          // User exists — ensure dual-scoped roles
+          const existingRoles = (userOnCity.roles || []) as Array<{ code: string; tenantId: string }>;
+          const existingSet = new Set(existingRoles.map(r => `${r.code}@${r.tenantId}`));
+          const missingRoles = dualRoles.filter(r => !existingSet.has(`${r.code}@${r.tenantId}`));
+          if (missingRoles.length > 0) {
+            await digitApi.userUpdate({
+              ...userOnCity,
+              roles: [...existingRoles, ...missingRoles],
+            });
+            adminUserResult.rolesAdded = missingRoles.length;
+          }
+          adminUserResult.provisioned = true;
+          adminUserResult.dualScoped = true;
+        } else {
+          // Create user on city tenant with dual-scoped roles
+          await digitApi.userCreate({
+            name,
+            mobileNumber,
+            userName,
+            password: currentPassword,
+            type: 'EMPLOYEE',
+            active: true,
+            emailId: (sourceUser?.emailId as string) || null,
+            gender: (sourceUser?.gender as string) || null,
+            roles: dualRoles,
+            tenantId,
+          }, tenantId);
+          adminUserResult.provisioned = true;
+          adminUserResult.dualScoped = true;
+          adminUserResult.rolesAdded = dualRoles.length;
+        }
+
+        // Also ensure the root-level user has city-scoped roles
+        if (sourceUser) {
+          const rootExistingRoles = (sourceUser.roles || []) as Array<{ code: string; tenantId: string }>;
+          const rootExistingSet = new Set(rootExistingRoles.map(r => `${r.code}@${r.tenantId}`));
+          const cityRoles = standardRoles
+            .map(code => ({ code, name: code, tenantId }))
+            .filter(r => !rootExistingSet.has(`${r.code}@${r.tenantId}`));
+          if (cityRoles.length > 0) {
+            await digitApi.userUpdate({
+              ...sourceUser,
+              roles: [...rootExistingRoles, ...cityRoles],
+            });
+            adminUserResult.rolesAdded += cityRoles.length;
+          }
+        }
+      } catch (err) {
+        adminUserResult.error = err instanceof Error ? err.message : String(err);
+      }
+      steps.adminUser = adminUserResult;
+
+      // Step 4: Copy workflow definitions (idempotent)
+      let workflowResult = { created: [] as string[], skipped: [] as string[], failed: [] as string[] };
+      try {
+        // Determine source for workflow: explicit arg > root (if it has workflows) > "pg"
+        let workflowSource = sourceArg || root;
+        if (!sourceArg) {
+          try {
+            const rootWorkflows = await digitApi.workflowBusinessServiceSearch(root, ['PGR']);
+            if (rootWorkflows.length === 0 && root !== 'pg') {
+              workflowSource = 'pg';
+            }
+          } catch (_) {
+            if (root !== 'pg') workflowSource = 'pg';
+          }
+        }
+        workflowResult = await copyWorkflowDefinitions(workflowSource, root);
+      } catch (err) {
+        workflowResult.failed.push(`workflow copy error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      steps.workflow = workflowResult;
+
+      // Step 5: Create boundary hierarchy + entities
+      if (createBoundaries) {
+        const boundaryResult: {
+          hierarchyReused: boolean;
+          entitiesCreated: number;
+          localityCodes: string[];
+          error?: string;
+        } = {
+          hierarchyReused: false,
+          entitiesCreated: 0,
+          localityCodes: [],
+        };
+
+        try {
+          // Check if hierarchy exists on root
+          let hierarchyLevels: string[] = [];
+          try {
+            const existing = await digitApi.boundaryHierarchySearch(root, 'ADMIN');
+            if (existing.length > 0) {
+              const hier = existing[0] as { boundaryHierarchy?: { boundaryType: string; parentBoundaryType?: string }[] };
+              if (hier.boundaryHierarchy) {
+                hierarchyLevels = buildOrderedLevels(hier.boundaryHierarchy);
+                boundaryResult.hierarchyReused = true;
+              }
+            }
+          } catch (_) {
+            // No hierarchy on root
+          }
+
+          if (hierarchyLevels.length === 0) {
+            hierarchyLevels = ['Country', 'State', 'District', 'City', 'Ward', 'Locality'];
+          }
+
+          // Create hierarchy on root if needed
+          const levels = hierarchyLevels.map((type, i) => ({
+            boundaryType: type,
+            parentBoundaryType: i === 0 ? null : hierarchyLevels[i - 1],
+            active: true,
+          }));
+
+          try {
+            await digitApi.boundaryHierarchyCreate(root, 'ADMIN', levels);
+          } catch (herr) {
+            const msg = herr instanceof Error ? herr.message : String(herr);
+            if (!msg.includes('DUPLICATE') && !msg.includes('already exists') && !msg.includes('unique')) {
+              console.error(`[city_setup] hierarchy create on root "${root}" failed: ${msg}`);
+            }
+          }
+
+          // Create hierarchy on city tenant too
+          try {
+            await digitApi.boundaryHierarchyCreate(tenantId, 'ADMIN', levels);
+          } catch (herr) {
+            const msg = herr instanceof Error ? herr.message : String(herr);
+            if (!msg.includes('DUPLICATE') && !msg.includes('already exists') && !msg.includes('unique')) {
+              console.error(`[city_setup] hierarchy create on city "${tenantId}" failed: ${msg}`);
+            }
+          }
+
+          // Build boundary entities
+          const locs = (localityCodes && localityCodes.length > 0)
+            ? localityCodes
+            : [`LOC_${cityCode}_1`];
+          boundaryResult.localityCodes = locs;
+
+          const countryCode = `COUNTRY_${cityCode}`;
+          const stateCode = `STATE_${cityCode}`;
+          const districtCode = `DISTRICT_${cityCode}`;
+          const cityBndCode = `CITY_${cityCode}`;
+
+          const boundaries: { code: string; type: string; parent?: string }[] = [
+            { code: countryCode, type: 'Country' },
+            { code: stateCode, type: 'State', parent: countryCode },
+            { code: districtCode, type: 'District', parent: stateCode },
+            { code: cityBndCode, type: 'City', parent: districtCode },
+          ];
+
+          // Create one Ward + Locality per locality code
+          for (let i = 0; i < locs.length; i++) {
+            const wardCode = `WARD_${cityCode}_${i + 1}`;
+            boundaries.push(
+              { code: wardCode, type: 'Ward', parent: cityBndCode },
+              { code: locs[i], type: 'Locality', parent: wardCode },
+            );
+          }
+
+          // Create boundary entities
+          for (const b of boundaries) {
+            try {
+              await digitApi.boundaryCreate(tenantId, [{ code: b.code, tenantId }]);
+              boundaryResult.entitiesCreated++;
+            } catch (berr) {
+              const msg = berr instanceof Error ? berr.message : String(berr);
+              if (!msg.includes('DUPLICATE') && !msg.includes('already exists') && !msg.includes('unique')) {
+                console.error(`[city_setup] boundary entity create "${b.code}" failed: ${msg}`);
+              } else {
+                boundaryResult.entitiesCreated++; // count skipped as "exists"
+              }
+            }
+          }
+
+          // Create relationships (top-down order is already correct)
+          for (const b of boundaries) {
+            try {
+              await digitApi.boundaryRelationshipCreate(
+                tenantId,
+                b.code,
+                'ADMIN',
+                b.type,
+                b.parent || null,
+              );
+            } catch (rerr) {
+              const msg = rerr instanceof Error ? rerr.message : String(rerr);
+              if (!msg.includes('DUPLICATE') && !msg.includes('already exists') && !msg.includes('unique')) {
+                console.error(`[city_setup] boundary relationship "${b.code}" failed: ${msg}`);
+              }
+            }
+          }
+        } catch (err) {
+          boundaryResult.error = err instanceof Error ? err.message : String(err);
+        }
+        steps.boundaries = boundaryResult;
+      }
+
+      return JSON.stringify({
+        success: true,
+        cityTenant: tenantId,
+        root,
+        steps,
+        nextSteps: [
+          `Create employees: employee_create with tenant_id="${tenantId}"`,
+          `Verify setup: validate_complaint_types, validate_employees with tenant_id="${tenantId}"`,
+          `Create complaints: pgr_create with tenant_id="${tenantId}"`,
+        ],
       }, null, 2);
     },
   } satisfies ToolMetadata);
