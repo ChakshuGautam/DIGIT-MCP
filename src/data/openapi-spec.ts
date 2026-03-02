@@ -1276,28 +1276,18 @@ function buildPaths(): Record<string, Record<string, unknown>> {
         tags: ['Encryption'],
         operationId: 'decryptData',
         summary: 'Decrypt encrypted data',
-        description: 'Decrypts previously encrypted values. May fail if the encryption key is not configured for the tenant.',
+        description:
+          'Decrypts previously encrypted values. Accepts a flat JSON array of encrypted strings ' +
+          '(the same format returned by the encrypt endpoint). The encrypted string contains an ' +
+          'embedded key reference so no tenantId is needed.',
         requestBody: {
           required: true,
           content: {
             'application/json': {
               schema: {
-                type: 'object',
-                required: ['decryptionRequests'],
-                properties: {
-                  decryptionRequests: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      required: ['tenantId', 'type', 'value'],
-                      properties: {
-                        tenantId: { type: 'string' },
-                        type: { type: 'string', enum: ['Normal'], default: 'Normal' },
-                        value: { type: 'string', description: 'Encrypted value to decrypt' },
-                      },
-                    },
-                  },
-                },
+                type: 'array',
+                items: { type: 'string', description: 'Encrypted value (e.g. "595525|xBCN...")' },
+                description: 'Array of encrypted strings to decrypt',
               },
             },
           },

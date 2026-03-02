@@ -1061,17 +1061,17 @@ async function main(): Promise<void> {
     console.log(`        Roundtrip OK: encrypted → decrypted = "hello-openapi"`);
   });
 
-  // decrypt: spec format (decryptionRequests envelope — test if API accepts it)
-  await test('Encryption: decrypt via spec format (decryptionRequests)', 'Encryption', async () => {
+  // decrypt: spec now documents flat array (matching actual API behavior)
+  await test('Encryption: decrypt matches spec (flat string array)', 'Encryption', async () => {
     if (!encryptedValue) { console.log('        \x1b[33m⚠ No encrypted value\x1b[0m'); return; }
-    const res = await apiPost('/egov-enc-service/crypto/v1/_decrypt', {
-      decryptionRequests: [{ tenantId: STATE_TENANT, type: 'Normal', value: encryptedValue }],
-    }, token);
-    assertEndpointReachable(res.status, '/egov-enc-service/crypto/v1/_decrypt');
-    // Note: this may 500 because the actual API takes flat array, not envelope
-    if (res.status === 500) {
-      console.log('        \x1b[33m⚠ SPEC DRIFT: decrypt API rejects decryptionRequests envelope — accepts flat array instead\x1b[0m');
-    }
+    // Spec now correctly documents: request = string[], response = string[]
+    const res = await fetch(`${BASE_URL}/egov-enc-service/crypto/v1/_decrypt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify([encryptedValue]),
+    });
+    assert(res.status === 200, `Spec-format decrypt failed: ${res.status}`);
+    const body = await res.json();
+    assert(Array.isArray(body), 'Response should be string array per spec');
   });
 
   // ════════════════════════════════════════════════════════════════
