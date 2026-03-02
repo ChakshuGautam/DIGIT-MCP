@@ -51,6 +51,28 @@ jobs:
           path: coverage/
           retention-days: 30
 
+  openapi-spec-test:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    env:
+      CRS_API_URL: ${{ secrets.CRS_API_URL }}
+      CRS_USERNAME: ${{ secrets.CRS_USERNAME }}
+      CRS_PASSWORD: ${{ secrets.CRS_PASSWORD }}
+      CRS_ENVIRONMENT: chakshu-digit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Validate OpenAPI spec against live APIs
+        run: npm run test:openapi
+
   docker:
     needs: build-and-test
     runs-on: ubuntu-latest
