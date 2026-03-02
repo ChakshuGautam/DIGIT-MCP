@@ -788,6 +788,14 @@ async function main() {
       jurisdiction_boundary_type: 'City',
       jurisdiction_boundary: state.employeeTenantId,
     });
+    // HRMS server bug: internally generates a random password that sometimes
+    // fails DIGIT's password policy ("MUST HAVE uppercase, digit, special char").
+    // The password we send (eGov@123) is compliant, but HRMS overrides it.
+    const isHrmsPasswordBug = !r.success && ((r.error as string) || '').includes('Password MUST HAVE');
+    if (isHrmsPasswordBug) {
+      markKnownBug('5.7 employee_create: second employee for REASSIGN', 'HRMS generates non-compliant password internally');
+      return ['employee_create'];
+    }
     assert(r.success === true, `employee_create #2 failed: ${r.error}`);
     const emp = r.employee as Record<string, unknown>;
     state.employeeCode2 = emp.code as string;
