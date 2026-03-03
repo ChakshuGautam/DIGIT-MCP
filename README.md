@@ -4,7 +4,29 @@
 
 MCP server for interacting with DIGIT platform APIs with **progressive disclosure** — 6 core tools load initially, with 26 more available on-demand across 10 domain groups. Supports **dual transport**: stdio (local Claude Code) and HTTP Streamable (containerized/K8s).
 
-## Quick Start
+## Install
+
+One command to configure your MCP client:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ChakshuGautam/DIGIT-MCP/main/install.sh | bash
+```
+
+This auto-detects your client (Claude Code, Cursor, Windsurf, VS Code), connects to the hosted server, and installs Claude Code skills. No cloning or building required.
+
+**Non-interactive:**
+
+```bash
+# Remote mode (default) — connects to hosted server
+curl -fsSL ... | bash -s -- --client claude-code --mode remote --yes
+
+# Local mode — clones repo and runs via stdio
+curl -fsSL ... | bash -s -- --client cursor --mode local --yes
+```
+
+For Claude Code, the installer also adds 4 skills that guide the AI through DIGIT workflows (tenant setup, PGR operations, UI building). See [`skills/`](skills/) for details.
+
+## Quick Start (Manual)
 
 ```bash
 npm install
@@ -167,19 +189,31 @@ Full API documentation is available at [`docs/openapi.yaml`](docs/openapi.yaml) 
 
 ## Claude Code Settings
 
-Add to `~/.claude/settings.json`:
+The easiest way is `curl -fsSL .../install.sh | bash` (see [Install](#install) above). To configure manually, add to `~/.claude.json` or project `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
-    "digit-mcp": {
+    "DIGIT-MCP": {
+      "type": "http",
+      "url": "https://mcp.egov.theflywheel.in/mcp"
+    }
+  }
+}
+```
+
+Or for local stdio mode:
+
+```json
+{
+  "mcpServers": {
+    "DIGIT-MCP": {
       "command": "node",
-      "args": ["/root/DIGIT-MCP/dist/index.js"],
+      "args": ["/path/to/DIGIT-MCP/dist/index.js"],
       "env": {
         "CRS_ENVIRONMENT": "local",
         "CRS_USERNAME": "ADMIN",
-        "CRS_PASSWORD": "eGov@123",
-        "CRS_TENANT_ID": "pg"
+        "CRS_PASSWORD": "eGov@123"
       }
     }
   }
