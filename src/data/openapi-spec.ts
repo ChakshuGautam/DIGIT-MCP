@@ -49,6 +49,7 @@ const TAGS = [
   { name: 'ID Generation', description: 'Unique ID generation service. Produces formatted IDs (complaint numbers, application IDs) from configured patterns.' },
   { name: 'Location', description: 'Legacy geographic boundary service (egov-location). Use Boundary service for newer deployments.' },
   { name: 'Encryption', description: 'Data encryption/decryption service. No authentication required — manages its own keys per tenant.' },
+  { name: 'Inbox', description: 'Unified inbox for workflow-driven services. Aggregates complaints/tasks by status with Elasticsearch-backed search. Use v2 endpoint for PGR.' },
 ];
 
 // ── All paths ──
@@ -1293,6 +1294,128 @@ function buildPaths(): Record<string, Record<string, unknown>> {
           },
         },
         responses: { '200': { description: 'Decrypted values (flat string array)', content: { 'application/json': { schema: { type: 'array', items: { type: 'string' } } } } } },
+      },
+    },
+
+    // ════════════════════════════════════════════
+    // INBOX
+    // ════════════════════════════════════════════
+
+    '/inbox/v2/_search': {
+      post: {
+        tags: ['Inbox'],
+        operationId: 'inboxV2Search',
+        summary: 'Search inbox items for workflow-driven services',
+        description:
+          'Unified inbox search aggregating workflow items by status. Returns status counts (statusMap), ' +
+          'total count, and paginated items with their workflow ProcessInstance and business object. ' +
+          'Requires Elasticsearch to be running. Use v2 — v1 requires module-specific inbox configuration ' +
+          'that may not be present for all services.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['RequestInfo', 'inbox'],
+                properties: {
+                  RequestInfo: { '$ref': '#/components/schemas/RequestInfo' },
+                  inbox: {
+                    type: 'object',
+                    required: ['tenantId', 'processSearchCriteria'],
+                    properties: {
+                      tenantId: { type: 'string', description: 'City-level tenant ID (e.g. "pg.citya")', example: 'pg.citya' },
+                      processSearchCriteria: {
+                        type: 'object',
+                        required: ['businessService', 'moduleName'],
+                        properties: {
+                          businessService: {
+                            type: 'array',
+                            items: { type: 'string' },
+                            description: 'Business service codes to search',
+                            example: ['PGR'],
+                          },
+                          moduleName: {
+                            type: 'string',
+                            description: 'Module name for the service',
+                            example: 'pgr-services',
+                          },
+                        },
+                      },
+                      moduleSearchCriteria: {
+                        type: 'object',
+                        description: 'Module-specific filter criteria (empty object for unfiltered)',
+                        additionalProperties: true,
+                      },
+                      limit: { type: 'integer', description: 'Page size', default: 10 },
+                      offset: { type: 'integer', description: 'Pagination offset', default: 0 },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Inbox search results with status aggregation',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    statusMap: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          statusid: { type: 'string', format: 'uuid' },
+                          count: { type: 'integer' },
+                          state: { type: 'string', example: 'PENDINGFORASSIGNMENT' },
+                          applicationstatus: { type: 'string' },
+                          businessservice: { type: 'string', example: 'PGR' },
+                        },
+                      },
+                      description: 'Aggregated complaint counts by workflow state',
+                    },
+                    totalCount: { type: 'integer', description: 'Total matching items' },
+                    items: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          ProcessInstance: {
+                            type: 'object',
+                            description: 'Workflow state for this item',
+                            properties: {
+                              state: {
+                                type: 'object',
+                                properties: {
+                                  state: { type: 'string', example: 'PENDINGFORASSIGNMENT' },
+                                  applicationStatus: { type: 'string' },
+                                },
+                              },
+                              action: { type: 'string', example: 'ASSIGN' },
+                              businessService: { type: 'string', example: 'PGR' },
+                              businessId: { type: 'string', example: 'PG-PGR-2026-01-15-000001' },
+                            },
+                          },
+                          businessObject: {
+                            type: 'object',
+                            description: 'The actual service object (e.g. PGR ServiceWrapper)',
+                            properties: {
+                              service: { '$ref': '#/components/schemas/ServiceWrapper' },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     },
   };

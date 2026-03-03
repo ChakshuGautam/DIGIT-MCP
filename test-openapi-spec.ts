@@ -1133,6 +1133,62 @@ async function main(): Promise<void> {
     }
   });
 
+  // ════════════════════════════════════════════════════════════════
+  // INBOX — unified inbox v2 search
+  // ════════════════════════════════════════════════════════════════
+  console.log('\n▸ Inbox');
+
+  await test('Inbox: v2/_search returns status map and items', 'Inbox', async () => {
+    // Inbox requires userInfo in RequestInfo (same as PGR create/update)
+    const riWithUser = { ...buildRequestInfo(token), userInfo };
+    const res = await fetch(`${BASE_URL}/inbox/v2/_search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        RequestInfo: riWithUser,
+        inbox: {
+          tenantId: 'pg.citya',
+          processSearchCriteria: { businessService: ['PGR'], moduleName: 'pgr-services' },
+          moduleSearchCriteria: {},
+          limit: 5,
+          offset: 0,
+        },
+      }),
+    });
+    // Inbox may not be routed through Kong — gracefully handle
+    if (res.status === 404 || res.status === 502 || res.status === 503) {
+      console.log(`        \x1b[33m⚠ Inbox not routed through gateway (${res.status})\x1b[0m`);
+      return;
+    }
+    assert(res.status === 200, `Expected 200, got ${res.status}`);
+    const body = await res.json();
+    assert(Array.isArray(body.statusMap), 'Response should have statusMap array');
+    assert(typeof body.totalCount === 'number', 'Response should have totalCount');
+    assert(Array.isArray(body.items), 'Response should have items array');
+  });
+
+  await test('Inbox: v1/_search returns error for unconfigured modules', 'Inbox', async () => {
+    const riWithUser = { ...buildRequestInfo(token), userInfo };
+    const res = await fetch(`${BASE_URL}/inbox/v1/_search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        RequestInfo: riWithUser,
+        inbox: {
+          tenantId: 'pg.citya',
+          processSearchCriteria: { businessService: ['PGR'], moduleName: 'pgr-services' },
+          moduleSearchCriteria: {},
+        },
+      }),
+    });
+    // v1 returns 400 for PGR because inbox is not configured for it
+    if (res.status === 404 || res.status === 502 || res.status === 503) {
+      console.log(`        \x1b[33m⚠ Inbox not routed through gateway (${res.status})\x1b[0m`);
+      return;
+    }
+    assert(res.status === 400, `Expected 400 for unconfigured v1, got ${res.status}`);
+  });
+
   // ── Consistency checks ──
   console.log('\n▸ Consistency Checks');
 
@@ -1190,6 +1246,8 @@ async function main(): Promise<void> {
       '/egov-bndry-mgmnt/v1/_generate',
       // Location (legacy)
       '/egov-location/location/v11/boundarys/_search',
+      // Inbox
+      '/inbox/v2/_search',
     ]);
 
     const untestedPaths = specPaths.filter(p => !testedPaths.has(p));

@@ -12,6 +12,7 @@ Start here if you want to get something done.
 | [City Setup](guides/city-setup.md) | Bootstrap a new tenant and set up PGR end-to-end |
 | [PGR Complaint Lifecycle](guides/pgr-lifecycle.md) | Create, assign, resolve, and rate complaints |
 | [Debugging & Monitoring](guides/debugging.md) | Trace failures, monitor persister health, inspect Kafka lag |
+| [API Nuances & Gotchas](guides/api-nuances.md) | Known DIGIT API quirks, format mismatches, and deployment-specific fixes |
 | [Building a PGR UI](ui.md) | Complete guide to building complaint management frontends |
 
 ## Architecture
@@ -79,4 +80,5 @@ docs/
     city-setup.md        <- Tenant provisioning guide
     pgr-lifecycle.md     <- End-to-end PGR workflow
     debugging.md         <- Observability and troubleshooting
+    api-nuances.md       <- Known API quirks and gotchas
 ```

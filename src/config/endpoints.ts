@@ -63,6 +63,9 @@ export const ENDPOINTS = {
   BNDRY_MGMT_GENERATE: '/egov-bndry-mgmnt/v1/_generate',
   BNDRY_MGMT_PROCESS_SEARCH: '/egov-bndry-mgmnt/v1/_process-search',
   BNDRY_MGMT_GENERATE_SEARCH: '/egov-bndry-mgmnt/v1/_generate-search',
+
+  // Inbox
+  INBOX_V2_SEARCH: '/inbox/v2/_search',
 } as const;
 
 // OAuth credentials
