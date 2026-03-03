@@ -6,10 +6,12 @@ import { fileURLToPath } from 'node:url';
 
 const MCP_ENDPOINT = 'https://docs.digit.org/platform/~gitbook/mcp';
 const LOCAL_URL_PREFIX = 'local://';
+const ENGRAM_URL_PREFIX = 'engram://';
 
-// Resolve docs/ directory relative to project root (two levels up from src/tools/)
+// Resolve docs/ and data/engrams/ directories relative to project root (two levels up from src/tools/)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DOCS_DIR = join(__dirname, '..', '..', 'docs');
+const ENGRAMS_DIR = join(__dirname, '..', '..', 'data', 'engrams');
 
 interface McpResult {
   result?: {
@@ -93,6 +95,78 @@ async function getLocalDoc(localUrl: string): Promise<{ title: string; content: 
   }
 }
 
+/**
+ * Search engram files in data/engrams/ for matching content.
+ * Same keyword-matching approach as local docs.
+ */
+async function searchEngramDocs(query: string): Promise<Array<{ title: string; link: string; content: string }>> {
+  const results: Array<{ title: string; link: string; content: string }> = [];
+  const keywords = query.toLowerCase().split(/\s+/).filter(Boolean);
+
+  let files: string[];
+  try {
+    files = await readdir(ENGRAMS_DIR);
+  } catch {
+    return results;
+  }
+
+  for (const file of files) {
+    if (!file.endsWith('.md')) continue;
+
+    try {
+      const content = await readFile(join(ENGRAMS_DIR, file), 'utf-8');
+      const lowerContent = content.toLowerCase();
+      const lowerFile = file.toLowerCase();
+
+      const matches = keywords.some(kw => lowerFile.includes(kw) || lowerContent.includes(kw));
+      if (!matches) continue;
+
+      const titleMatch = content.match(/^#\s+(.+)/m);
+      const title = titleMatch ? titleMatch[1] : file.replace('.md', '');
+
+      let snippet = '';
+      for (const kw of keywords) {
+        const idx = lowerContent.indexOf(kw);
+        if (idx >= 0) {
+          const start = Math.max(0, idx - 100);
+          const end = Math.min(content.length, idx + 300);
+          snippet = (start > 0 ? '...' : '') + content.slice(start, end).replace(/\n/g, ' ').trim() + (end < content.length ? '...' : '');
+          break;
+        }
+      }
+
+      results.push({
+        title: `[Engram] ${title}`,
+        link: `${ENGRAM_URL_PREFIX}${file}`,
+        content: snippet.slice(0, 500),
+      });
+    } catch {
+      // Skip unreadable files
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Read an engram file by its engram:// URL.
+ */
+async function getEngramDoc(engramUrl: string): Promise<{ title: string; content: string } | null> {
+  const filename = engramUrl.replace(ENGRAM_URL_PREFIX, '');
+  if (filename.includes('..') || filename.includes('/')) return null;
+
+  try {
+    const content = await readFile(join(ENGRAMS_DIR, filename), 'utf-8');
+    const titleMatch = content.match(/^#\s+(.+)/m);
+    return {
+      title: titleMatch ? titleMatch[1] : filename.replace('.md', ''),
+      content,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function searchDocs(query: string): Promise<Array<{ title: string; link: string; content: string }>> {
   const response = await fetch(MCP_ENDPOINT, {
     method: 'POST',
@@ -155,6 +229,7 @@ export function registerDocsTools(registry: ToolRegistry): void {
     description:
       'Search the DIGIT documentation (docs.digit.org) for guides, API references, configuration details, architecture docs, and how-to articles. ' +
       'Also searches local docs bundled with this MCP server (UI building guide, API patterns, etc.). ' +
+      'Also searches engram knowledge docs (learned API behaviors, workflow patterns, and claims from past sessions). ' +
       'Covers all DIGIT modules: platform, PGR, works, sanitation, health, local governance, and public finance. Returns titles, links, and content snippets.',
     inputSchema: {
       type: 'object' as const,
@@ -173,17 +248,19 @@ export function registerDocsTools(registry: ToolRegistry): void {
       }
 
       try {
-        // Search both local and remote docs in parallel
-        const [localResults, remoteResults] = await Promise.allSettled([
+        // Search local, engram, and remote docs in parallel
+        const [localResults, engramResults, remoteResults] = await Promise.allSettled([
           searchLocalDocs(query.trim()),
+          searchEngramDocs(query.trim()),
           searchDocs(query.trim()),
         ]);
 
         const local = localResults.status === 'fulfilled' ? localResults.value : [];
+        const engram = engramResults.status === 'fulfilled' ? engramResults.value : [];
         const remote = remoteResults.status === 'fulfilled' ? remoteResults.value : [];
 
-        // Local docs first, then remote
-        const allResults = [...local, ...remote];
+        // Engrams first (learned knowledge), then local docs, then remote
+        const allResults = [...engram, ...local, ...remote];
 
         if (allResults.length === 0) {
           return JSON.stringify({
@@ -224,13 +301,13 @@ export function registerDocsTools(registry: ToolRegistry): void {
     risk: 'read',
     description:
       'Fetch the full markdown content of a DIGIT documentation page. Use docs_search first to find the URL, then pass it here to read the complete page. ' +
-      'Accepts docs.digit.org URLs and local:// URLs for bundled docs (e.g. "local://ui.md" for the UI building guide).',
+      'Accepts docs.digit.org URLs, local:// URLs for bundled docs (e.g. "local://ui.md" for the UI building guide), and engram:// URLs for learned knowledge docs.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         url: {
           type: 'string',
-          description: 'The docs.digit.org page URL (e.g. "https://docs.digit.org/platform/platform/core-services/mdms-v2-master-data-management-service") or a local:// URL (e.g. "local://ui.md")',
+          description: 'The docs.digit.org page URL (e.g. "https://docs.digit.org/platform/platform/core-services/mdms-v2-master-data-management-service"), a local:// URL (e.g. "local://ui.md"), or an engram:// URL (e.g. "engram://workflow_registry.md")',
         },
       },
       required: ['url'],
@@ -259,11 +336,29 @@ export function registerDocsTools(registry: ToolRegistry): void {
         }, null, 2);
       }
 
+      // Handle engram docs
+      if (url.startsWith(ENGRAM_URL_PREFIX)) {
+        const doc = await getEngramDoc(url);
+        if (!doc) {
+          return JSON.stringify({
+            success: false,
+            error: `Engram doc not found: ${url}`,
+            hint: 'Use docs_search to find available engram docs.',
+          }, null, 2);
+        }
+        return JSON.stringify({
+          success: true,
+          url,
+          title: doc.title,
+          content: doc.content,
+        }, null, 2);
+      }
+
       // Ensure it's a docs.digit.org URL
       if (!url.includes('docs.digit.org')) {
         return JSON.stringify({
           success: false,
-          error: 'URL must be a docs.digit.org page or a local:// URL',
+          error: 'URL must be a docs.digit.org page, a local:// URL, or an engram:// URL',
           hint: 'Use docs_search to find valid documentation URLs.',
         });
       }

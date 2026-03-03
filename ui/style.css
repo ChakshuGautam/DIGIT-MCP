@@ -182,6 +182,11 @@ main {
   color: var(--green);
 }
 
+.badge-client {
+  background: rgba(188, 140, 255, 0.15);
+  color: var(--purple);
+}
+
 .session-env {
   font-size: 12px;
   color: var(--text-muted);
@@ -241,6 +246,12 @@ main {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.detail-client-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  font-family: var(--font-mono);
 }
 
 #detail-content {

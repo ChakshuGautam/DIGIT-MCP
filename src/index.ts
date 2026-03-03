@@ -109,7 +109,9 @@ if (transportMode === 'stdio') {
       await sessionStore.ensureSession('http');
       const clientIp = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.socket.remoteAddress || '';
       const userAgent = req.headers['user-agent'] || '';
-      mcpLogger.setRequestContext(String(clientIp).split(',')[0].trim(), userAgent);
+      const normalizedIp = String(clientIp).split(',')[0].trim();
+      mcpLogger.setRequestContext(normalizedIp, userAgent);
+      sessionStore.setHttpContext(String(userAgent), normalizedIp);
 
       const server = createServer({ enableAllGroups: true });
       const transport = new StreamableHTTPServerTransport({
@@ -158,7 +160,8 @@ if (transportMode === 'stdio') {
         // Fetch session metadata
         const sessionRows = await db.query(
           `SELECT id, started_at, environment, transport, tool_count, checkpoint_count, error_count,
-                  last_checkpoint_summary, updated_at, user_name, user_purpose
+                  last_checkpoint_summary, updated_at, user_name, user_purpose,
+                  client_name, user_agent, client_ip
            FROM sessions WHERE id = $1`,
           [sessionId]
         );
@@ -259,7 +262,8 @@ if (transportMode === 'stdio') {
 
         const sessions = await db.query(
           `SELECT id, started_at, environment, transport, tool_count, checkpoint_count,
-                  error_count, last_checkpoint_summary, updated_at, user_name, user_purpose
+                  error_count, last_checkpoint_summary, updated_at, user_name, user_purpose,
+                  client_name, user_agent, client_ip
            FROM sessions ORDER BY started_at DESC LIMIT $1 OFFSET $2`,
           [limit, offset]
         );

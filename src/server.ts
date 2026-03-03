@@ -8,6 +8,7 @@ import { registerAllTools } from './tools/index.js';
 import { ALL_GROUPS } from './types/index.js';
 import { mcpLogger } from './logger.js';
 import { sessionStore } from './services/session-store.js';
+import { telemetry } from './services/telemetry.js';
 
 export interface CreateServerOptions {
   enableAllGroups?: boolean;
@@ -94,8 +95,9 @@ export function createServer(options?: CreateServerOptions): Server {
     const sanitizedArgs = (args || {}) as Record<string, unknown>;
     mcpLogger.toolCall(name, sanitizedArgs);
 
-    // Record tool call in session
+    // Record tool call in session + telemetry
     const seq = sessionStore.recordToolCall(name, sanitizedArgs);
+    telemetry.toolCall(name, tool.group);
 
     try {
       const result = await tool.handler(sanitizedArgs);
@@ -117,6 +119,7 @@ export function createServer(options?: CreateServerOptions): Server {
       const errorMsg = error instanceof Error ? error.message : String(error);
       mcpLogger.toolResult(name, durationMs, true);
       sessionStore.recordToolResult(seq, name, durationMs, true, '', errorMsg);
+      telemetry.toolError(name, errorMsg);
 
       return {
         content: [

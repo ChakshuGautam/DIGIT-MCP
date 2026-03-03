@@ -97,7 +97,7 @@ async function loadSessions() {
           <span class="session-time">${relativeTime(s.started_at)}</span>
           <span class="badge badge-${s.transport}">${s.transport}</span>
         </div>
-        <div class="session-env">${escapeHtml(s.environment || 'unknown')}${s.user_name ? ` &middot; ${escapeHtml(s.user_name)}` : ''}</div>
+        <div class="session-env">${escapeHtml(s.environment || 'unknown')}${s.user_name ? ` &middot; ${escapeHtml(s.user_name)}` : ''}${s.client_name ? ` &middot; <span class="badge badge-client">${escapeHtml(s.client_name)}</span>` : ''}</div>
         <div class="session-stats">
           <span>Tools: ${s.tool_count || 0}</span>
           <span class="${hasErrors ? 'has-errors' : ''}">Err: ${s.error_count || 0}</span>
@@ -137,8 +137,11 @@ async function selectSession(id) {
   // Header
   if (session) {
     const userLine = session.user_name
-      ? `<div class="detail-user"><span>User: <strong>${escapeHtml(session.user_name)}</strong></span>${session.user_purpose ? ` <span>| Purpose: ${escapeHtml(session.user_purpose)}</span>` : ''}</div>`
-      : '';
+      ? `<div class="detail-user"><span>User: <strong>${escapeHtml(session.user_name)}</strong></span>${session.user_purpose ? ` <span>| Purpose: ${escapeHtml(session.user_purpose)}</span>` : ''}${session.client_name ? ` <span>| Client: <strong>${escapeHtml(session.client_name)}</strong></span>` : ''}</div>`
+      : (session.client_name ? `<div class="detail-user"><span>Client: <strong>${escapeHtml(session.client_name)}</strong></span></div>` : '');
+    const clientMeta = [];
+    if (session.user_agent) clientMeta.push(`UA: ${escapeHtml(session.user_agent.length > 60 ? session.user_agent.slice(0, 60) + '...' : session.user_agent)}`);
+    if (session.client_ip) clientMeta.push(`IP: ${escapeHtml(session.client_ip)}`);
     $detailHeader.innerHTML = `
       <div class="detail-title">${shortId(session.id)}&hellip;</div>
       ${userLine}
@@ -150,6 +153,7 @@ async function selectSession(id) {
         <span>Errors: ${session.error_count || 0}</span>
         <span>Checkpoints: ${session.checkpoint_count || 0}</span>
       </div>
+      ${clientMeta.length > 0 ? `<div class="detail-meta detail-client-meta"><span>${clientMeta.join('</span><span>')}</span></div>` : ''}
     `;
   } else {
     $detailHeader.innerHTML = `<div class="detail-title">${shortId(id)}&hellip;</div>`;

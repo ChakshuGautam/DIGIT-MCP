@@ -43,7 +43,8 @@ export function registerSessionTools(registry: ToolRegistry): void {
       'Initialize a DIGIT MCP session. Call this at the start of a conversation to set up the session context. ' +
       'Before calling, ask the user: (1) their name, (2) what they want to accomplish (e.g. "set up PGR for a new tenant", ' +
       '"debug a failing complaint", "explore the API"), (3) whether to enable telemetry (session tracking for the viewer). ' +
-      'The tool maps the user\'s intent to relevant tool groups and auto-enables them.',
+      'The tool maps the user\'s intent to relevant tool groups and auto-enables them. ' +
+      'Also pass client_name to identify your platform (e.g. "Claude Code", "Lovable", "Cursor").',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -61,6 +62,13 @@ export function registerSessionTools(registry: ToolRegistry): void {
           type: 'boolean',
           description: 'Whether to enable session telemetry (checkpoint tracking, viewer integration). Default: true',
         },
+        client_name: {
+          type: 'string',
+          description:
+            'Self-declared identity of the AI client or platform calling the MCP server. ' +
+            'Examples: "Claude Code", "Lovable", "Cursor", "Windsurf", "custom-agent". ' +
+            'This helps identify which tool is generating the session in the viewer.',
+        },
       },
       required: ['purpose'],
     },
@@ -68,9 +76,10 @@ export function registerSessionTools(registry: ToolRegistry): void {
       const userName = (args.user_name as string) || 'anonymous';
       const purpose = args.purpose as string;
       const telemetry = args.telemetry !== false; // default true
+      const clientName = (args.client_name as string) || undefined;
 
       // 1. Record user context in session
-      sessionStore.setUserContext(userName, purpose, telemetry);
+      sessionStore.setUserContext(userName, purpose, telemetry, clientName);
 
       // 2. Map intent to tool groups
       const intentMap: Record<string, ToolGroup[]> = {
@@ -125,6 +134,7 @@ export function registerSessionTools(registry: ToolRegistry): void {
             userName,
             purpose,
             telemetry,
+            clientName: clientName || undefined,
           },
           enabledGroups: registry.getEnabledGroups(),
           toolCount: `${summary.enabledTools} of ${summary.totalTools} tools now enabled`,

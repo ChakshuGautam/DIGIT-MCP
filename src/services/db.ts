@@ -49,6 +49,27 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, turn);
 
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_name TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_purpose TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS client_name TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS client_ip TEXT;
+
+CREATE TABLE IF NOT EXISTS engram_runs (
+  id                 SERIAL PRIMARY KEY,
+  run_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sessions_processed INTEGER NOT NULL DEFAULT 0,
+  status             TEXT NOT NULL CHECK (status IN ('success', 'partial', 'failed')),
+  error_message      TEXT,
+  window_start       TIMESTAMPTZ NOT NULL,
+  window_end         TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS engram_id_counters (
+  category TEXT PRIMARY KEY,
+  next_id  INTEGER NOT NULL DEFAULT 1
+);
+INSERT INTO engram_id_counters (category, next_id)
+  VALUES ('A', 1), ('C', 1), ('W', 1)
+  ON CONFLICT DO NOTHING;
 `;
 
 class Db {

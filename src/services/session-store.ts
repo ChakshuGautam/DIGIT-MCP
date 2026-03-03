@@ -2,6 +2,7 @@ import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { db } from './db.js';
+import { telemetry as matomo } from './telemetry.js';
 
 // --- Types ---
 
@@ -18,6 +19,9 @@ interface SessionRecord {
   userName?: string;
   purpose?: string;
   telemetry?: boolean;
+  clientName?: string;
+  userAgent?: string;
+  clientIp?: string;
 }
 
 // --- Sensitive field sanitization (matches logger.ts) ---
@@ -97,6 +101,9 @@ class SessionStore {
        VALUES ($1, $2, $3, $4)`,
       [this.session.id, this.session.startedAt, this.session.environment, this.session.transport]
     );
+
+    // Matomo telemetry (fire-and-forget)
+    matomo.sessionStart(transport, this.session.environment);
   }
 
   getSession(): SessionRecord | null {
@@ -105,17 +112,36 @@ class SessionStore {
 
   // --- User context (set by init tool) ---
 
-  setUserContext(userName: string, purpose: string, telemetry: boolean): void {
+  setUserContext(userName: string, purpose: string, telemetry: boolean, clientName?: string): void {
     if (!this.session) return;
 
     this.session.userName = userName;
     this.session.purpose = purpose;
     this.session.telemetry = telemetry;
+    if (clientName) this.session.clientName = clientName;
 
     // Persist to DB (fire-and-forget)
     db.execute(
-      `UPDATE sessions SET user_name = $1, user_purpose = $2 WHERE id = $3`,
-      [userName, purpose, this.session.id]
+      `UPDATE sessions SET user_name = $1, user_purpose = $2, client_name = COALESCE($3, client_name) WHERE id = $4`,
+      [userName, purpose, clientName || null, this.session.id]
+    );
+
+    // Matomo telemetry (fire-and-forget)
+    matomo.initCalled(clientName || 'unknown', purpose);
+  }
+
+  // --- HTTP context (set from request headers) ---
+
+  setHttpContext(userAgent: string, clientIp: string): void {
+    if (!this.session) return;
+
+    this.session.userAgent = userAgent;
+    this.session.clientIp = clientIp;
+
+    // Persist to DB (fire-and-forget)
+    db.execute(
+      `UPDATE sessions SET user_agent = $1, client_ip = $2 WHERE id = $3`,
+      [userAgent || null, clientIp || null, this.session.id]
     );
   }
 
