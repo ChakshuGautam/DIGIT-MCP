@@ -1,6 +1,7 @@
 import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
+import { validateTenantId, validateMobileNumber, rejectControlChars, validateStringLength, validateResourceId } from '../utils/validation.js';
 
 export function registerPgrWorkflowTools(registry: ToolRegistry): void {
   // ──────────────────────────────────────────
@@ -142,6 +143,14 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'service_code', 'description', 'address', 'citizen_name', 'citizen_mobile'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateMobileNumber(args.citizen_mobile, 'citizen_mobile');
+      rejectControlChars(args.description as string, 'description');
+      validateStringLength(args.description as string, 2000, 'description');
+      rejectControlChars(args.citizen_name as string, 'citizen_name');
+      validateStringLength(args.citizen_name as string, 200, 'citizen_name');
+      validateResourceId(args.service_code as string, 'service_code');
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;

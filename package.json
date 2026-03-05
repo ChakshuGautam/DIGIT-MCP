@@ -17,6 +17,7 @@
     "test:full": "c8 --src src --include 'src/**/*.ts' --exclude 'src/index.ts' --exclude 'src/server.ts' --exclude 'src/data/**' --reporter text --reporter text-summary --reporter html tsx test-integration-full.ts",
     "test:e2e": "tsx test-e2e-new-tenant.ts",
     "test:openapi": "tsx test-openapi-spec.ts",
+    "test:safety": "tsx test-agent-safety.ts",
     "engram": "tsx engram-agent.ts"
   },
   "dependencies": {

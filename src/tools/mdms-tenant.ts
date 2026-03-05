@@ -4,6 +4,7 @@ import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
 import { ENVIRONMENTS } from '../config/environments.js';
 import { buildOrderedLevels } from './validators.js';
+import { validateTenantId, validateResourceId } from '../utils/validation.js';
 
 /**
  * Search for MDMS records across all state tenants.
@@ -1586,6 +1587,10 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'schema_code', 'unique_identifier', 'data'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.schema_code as string, 'schema_code');
+      validateResourceId(args.unique_identifier as string, 'unique_identifier');
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;

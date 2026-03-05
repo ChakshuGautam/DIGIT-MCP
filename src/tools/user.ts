@@ -1,6 +1,7 @@
 import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
+import { validateTenantId, validateMobileNumber, rejectControlChars, validateStringLength } from '../utils/validation.js';
 
 export function registerUserTools(registry: ToolRegistry): void {
   registry.register({
@@ -160,6 +161,11 @@ export function registerUserTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'name', 'mobile_number'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateMobileNumber(args.mobile_number, 'mobile_number');
+      rejectControlChars(args.name as string, 'name');
+      validateStringLength(args.name as string, 200, 'name');
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;

@@ -1,6 +1,7 @@
 import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
+import { validateTenantId, rejectControlChars } from '../utils/validation.js';
 
 export function registerLocalizationTools(registry: ToolRegistry): void {
   registry.register({
@@ -92,11 +93,17 @@ export function registerLocalizationTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'messages'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      const messages = args.messages as { code: string; message: string; module: string }[];
+      for (const msg of messages) {
+        rejectControlChars(msg.code, 'message.code');
+        rejectControlChars(msg.message, 'message.message');
+      }
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;
       const locale = (args.locale as string) || 'en_IN';
-      const messages = args.messages as { code: string; message: string; module: string }[];
 
       const result = await digitApi.localizationUpsert(tenantId, locale, messages);
 
