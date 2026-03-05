@@ -5,6 +5,7 @@ import { digitApi } from '../services/digit-api.js';
 import { ENVIRONMENTS } from '../config/environments.js';
 import { buildOrderedLevels } from './validators.js';
 import { validateTenantId, validateResourceId } from '../utils/validation.js';
+import { applyFieldMask } from '../utils/field-mask.js';
 
 /**
  * Search for MDMS records across all state tenants.
@@ -576,6 +577,11 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           type: 'number',
           description: 'Offset for pagination (default: 0)',
         },
+        fields: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional: only return these fields per result. Available: uniqueIdentifier, data, isActive',
+        },
       },
       required: ['tenant_id', 'schema_code'],
     },
@@ -592,17 +598,23 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         }
       );
 
+      const fields = args.fields as string[] | undefined;
+      const mapped = records.map((r) => ({
+        uniqueIdentifier: r.uniqueIdentifier,
+        data: r.data,
+        isActive: r.isActive,
+      }));
+      const { items: masked, truncated } = applyFieldMask(mapped, fields);
+
       return JSON.stringify(
         {
           success: true,
           tenantId: args.tenant_id,
           schemaCode: args.schema_code,
           count: records.length,
-          records: records.map((r) => ({
-            uniqueIdentifier: r.uniqueIdentifier,
-            data: r.data,
-            isActive: r.isActive,
-          })),
+          records: masked,
+          truncated,
+          ...(fields ? { fieldsApplied: fields } : {}),
         },
         null,
         2

@@ -2,6 +2,8 @@ import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
 import { validateTenantId, rejectControlChars } from '../utils/validation.js';
+import { sanitizeUserContent } from '../utils/sanitize.js';
+import { applyFieldMask } from '../utils/field-mask.js';
 
 export function registerLocalizationTools(registry: ToolRegistry): void {
   registry.register({
@@ -26,6 +28,11 @@ export function registerLocalizationTools(registry: ToolRegistry): void {
           type: 'string',
           description: 'Module filter (e.g. "rainmaker-pgr", "rainmaker-common")',
         },
+        fields: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional: only return these fields per result. Available: code, message, module',
+        },
       },
       required: ['tenant_id'],
     },
@@ -38,6 +45,14 @@ export function registerLocalizationTools(registry: ToolRegistry): void {
 
       const messages = await digitApi.localizationSearch(tenantId, locale, module);
 
+      const fields = args.fields as string[] | undefined;
+      const mapped = messages.map((m) => ({
+        code: m.code,
+        message: sanitizeUserContent(m.message as string),
+        module: m.module,
+      }));
+      const { items: masked, truncated } = applyFieldMask(mapped, fields);
+
       return JSON.stringify(
         {
           success: true,
@@ -45,12 +60,9 @@ export function registerLocalizationTools(registry: ToolRegistry): void {
           locale,
           module: module || '(all)',
           count: messages.length,
-          messages: messages.slice(0, 100).map((m) => ({
-            code: m.code,
-            message: m.message,
-            module: m.module,
-          })),
-          truncated: messages.length > 100,
+          messages: masked,
+          truncated,
+          ...(fields ? { fieldsApplied: fields } : {}),
         },
         null,
         2

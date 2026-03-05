@@ -2,6 +2,8 @@ import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
 import { validateTenantId, validateMobileNumber, rejectControlChars, validateStringLength } from '../utils/validation.js';
+import { sanitizeUserContent } from '../utils/sanitize.js';
+import { applyFieldMask } from '../utils/field-mask.js';
 
 export function registerUserTools(registry: ToolRegistry): void {
   registry.register({
@@ -45,6 +47,11 @@ export function registerUserTools(registry: ToolRegistry): void {
         },
         limit: { type: 'number', description: 'Max results (default: 100)' },
         offset: { type: 'number', description: 'Offset for pagination (default: 0)' },
+        fields: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional: only return these fields per result. Available: id, uuid, userName, name, mobileNumber, emailId, type, active, tenantId, roles',
+        },
       },
       required: ['tenant_id'],
     },
@@ -62,28 +69,33 @@ export function registerUserTools(registry: ToolRegistry): void {
           offset: (args.offset as number) || 0,
         });
 
+        const fields = args.fields as string[] | undefined;
+        const mapped = users.map((u) => ({
+          id: u.id,
+          uuid: u.uuid,
+          userName: u.userName,
+          name: sanitizeUserContent(u.name as string),
+          mobileNumber: u.mobileNumber,
+          emailId: u.emailId,
+          type: u.type,
+          active: u.active,
+          tenantId: u.tenantId,
+          roles: ((u.roles || []) as Array<{ code: string; name?: string; tenantId?: string }>).map((r) => ({
+            code: r.code,
+            name: r.name,
+            tenantId: r.tenantId,
+          })),
+        }));
+        const { items: masked, truncated } = applyFieldMask(mapped, fields);
+
         return JSON.stringify(
           {
             success: true,
             tenantId: args.tenant_id,
             count: users.length,
-            users: users.slice(0, 50).map((u) => ({
-              id: u.id,
-              uuid: u.uuid,
-              userName: u.userName,
-              name: u.name,
-              mobileNumber: u.mobileNumber,
-              emailId: u.emailId,
-              type: u.type,
-              active: u.active,
-              tenantId: u.tenantId,
-              roles: ((u.roles || []) as Array<{ code: string; name?: string; tenantId?: string }>).map((r) => ({
-                code: r.code,
-                name: r.name,
-                tenantId: r.tenantId,
-              })),
-            })),
-            truncated: users.length > 50,
+            users: masked,
+            truncated,
+            ...(fields ? { fieldsApplied: fields } : {}),
           },
           null,
           2

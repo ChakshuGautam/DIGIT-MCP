@@ -2,6 +2,8 @@ import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
 import { validateTenantId, validateMobileNumber, rejectControlChars, validateStringLength, validateResourceId } from '../utils/validation.js';
+import { sanitizeUserContent } from '../utils/sanitize.js';
+import { applyFieldMask } from '../utils/field-mask.js';
 
 export function registerPgrWorkflowTools(registry: ToolRegistry): void {
   // ──────────────────────────────────────────
@@ -33,61 +35,70 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         },
         limit: { type: 'number', description: 'Max results (default: 50)' },
         offset: { type: 'number', description: 'Offset for pagination (default: 0)' },
+        fields: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional: only return these fields per result. Available: serviceRequestId, serviceCode, description, status, priority, rating, citizen, address, workflow, createdTime, lastModifiedTime',
+        },
       },
       required: ['tenant_id'],
     },
     handler: async (args) => {
       await ensureAuthenticated();
 
-      const complaints = await digitApi.pgrSearch(args.tenant_id as string, {
+      const tenantId = args.tenant_id as string;
+      const allComplaints = await digitApi.pgrSearch(tenantId, {
         serviceRequestId: args.service_request_id as string | undefined,
         status: args.status as string | undefined,
         limit: (args.limit as number) || 50,
         offset: (args.offset as number) || 0,
       });
 
-      return JSON.stringify(
-        {
-          success: true,
-          tenantId: args.tenant_id,
-          count: complaints.length,
-          complaints: complaints.map((sw) => {
-            const svc = sw.service as Record<string, unknown> | undefined;
-            const wf = sw.workflow as Record<string, unknown> | undefined;
-            const citizen = svc?.citizen as Record<string, unknown> | undefined;
-            const address = svc?.address as Record<string, unknown> | undefined;
-            const audit = svc?.auditDetails as Record<string, unknown> | undefined;
-            return {
-              serviceRequestId: svc?.serviceRequestId,
-              serviceCode: svc?.serviceCode,
-              description: svc?.description,
-              status: svc?.applicationStatus,
-              priority: svc?.priority,
-              rating: svc?.rating,
-              citizen: citizen ? {
-                name: citizen.name,
-                mobileNumber: citizen.mobileNumber,
-                uuid: citizen.uuid,
-              } : null,
-              address: address ? {
-                locality: address.locality,
-                city: address.city,
-                district: address.district,
-              } : null,
-              workflow: wf ? {
-                action: wf.action,
-                state: wf.state,
-                assignes: wf.assignes,
-                comment: wf.comments,
-              } : null,
-              createdTime: audit?.createdTime,
-              lastModifiedTime: audit?.lastModifiedTime,
-            };
-          }),
-        },
-        null,
-        2
-      );
+      const complaints = allComplaints.map((sw) => {
+        const svc = sw.service as Record<string, unknown> | undefined;
+        const wf = sw.workflow as Record<string, unknown> | undefined;
+        const citizen = svc?.citizen as Record<string, unknown> | undefined;
+        const address = svc?.address as Record<string, unknown> | undefined;
+        const audit = svc?.auditDetails as Record<string, unknown> | undefined;
+        return {
+          serviceRequestId: svc?.serviceRequestId,
+          serviceCode: svc?.serviceCode,
+          description: sanitizeUserContent(svc?.description as string),
+          status: svc?.applicationStatus,
+          priority: svc?.priority,
+          rating: svc?.rating,
+          citizen: citizen ? {
+            name: citizen.name,
+            mobileNumber: citizen.mobileNumber,
+            uuid: citizen.uuid,
+          } : null,
+          address: address ? {
+            locality: address.locality,
+            city: address.city,
+            district: address.district,
+          } : null,
+          workflow: wf ? {
+            action: wf.action,
+            state: wf.state,
+            assignes: wf.assignes,
+            comment: wf.comments,
+          } : null,
+          createdTime: audit?.createdTime,
+          lastModifiedTime: audit?.lastModifiedTime,
+        };
+      });
+
+      const fields = args.fields as string[] | undefined;
+      const { items: masked, truncated } = applyFieldMask(complaints, fields);
+
+      return JSON.stringify({
+        success: true,
+        tenantId,
+        count: allComplaints.length,
+        complaints: masked,
+        truncated,
+        ...(fields ? { fieldsApplied: fields } : {}),
+      }, null, 2);
     },
   } satisfies ToolMetadata);
 
