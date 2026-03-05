@@ -9,7 +9,7 @@ export function applyFieldMask<T extends Record<string, unknown>>(
   fields?: string[],
   limit?: number
 ): { items: T[]; truncated: boolean } {
-  const max = limit || DEFAULT_LIMIT;
+  const max = limit ?? DEFAULT_LIMIT;
   const truncated = items.length > max;
   const sliced = items.slice(0, max);
 

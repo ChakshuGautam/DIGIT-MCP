@@ -349,6 +349,9 @@ export function registerHrmsTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'employee_code'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.employee_code, 'employee_code');
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;

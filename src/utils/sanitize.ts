@@ -17,7 +17,7 @@ const INJECTION_PATTERNS = [
   /new\s+instructions?\s*:/gi,
   /override\s+instructions/gi,
   /forget\s+(all\s+)?(your\s+)?instructions/gi,
-  /act\s+as\s+(if\s+you\s+are\s+)?a\s+/gi,
+  /act\s+as\s+if\s+you\s+are\s+a\s+/gi,
   /pretend\s+(you\s+are|to\s+be)\s+/gi,
 ];
 
@@ -28,10 +28,9 @@ export function sanitizeUserContent(text: string | null | undefined): string {
   let modified = false;
 
   for (const pattern of INJECTION_PATTERNS) {
-    pattern.lastIndex = 0;
-    if (pattern.test(sanitized)) {
-      pattern.lastIndex = 0;
-      sanitized = sanitized.replace(pattern, '[filtered]');
+    const replaced = sanitized.replace(pattern, '[filtered]');
+    if (replaced !== sanitized) {
+      sanitized = replaced;
       modified = true;
     }
   }

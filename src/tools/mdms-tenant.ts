@@ -708,6 +708,10 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'code'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.code, 'code');
+      if (args.copy_from_tenant) validateTenantId(args.copy_from_tenant, 'copy_from_tenant');
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;
@@ -789,6 +793,9 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       required: ['target_tenant'],
     },
     handler: async (args) => {
+      validateTenantId(args.target_tenant, 'target_tenant');
+      if (args.source_tenant) validateTenantId(args.source_tenant, 'source_tenant');
+
       await ensureAuthenticated();
 
       const target = args.target_tenant as string;
@@ -1095,6 +1102,9 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'city_name'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      if (args.source_tenant) validateTenantId(args.source_tenant, 'source_tenant');
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;
@@ -1468,6 +1478,8 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       required: ['tenant_id'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;

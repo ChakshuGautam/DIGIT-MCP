@@ -2031,7 +2031,7 @@ async function main() {
   await test('17.13 workflow_create: nonexistent source tenant', async () => {
     const r = await call('workflow_create', {
       tenant_id: state.stateTenantId,
-      copy_from_tenant: 'nonexistent.xyz.999',
+      copy_from_tenant: 'nonexistent.abc.def',
     });
     assert(r.success === false, 'workflow_create with nonexistent source should fail');
     assert(typeof r.error === 'string' && (r.error as string).length > 0,

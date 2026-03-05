@@ -68,7 +68,7 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
           priority: svc?.priority,
           rating: svc?.rating,
           citizen: citizen ? {
-            name: citizen.name,
+            name: sanitizeUserContent(citizen.name as string),
             mobileNumber: citizen.mobileNumber,
             uuid: citizen.uuid,
           } : null,
@@ -395,6 +395,10 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'service_request_id', 'action'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.service_request_id, 'service_request_id');
+      if (args.comment) rejectControlChars(args.comment, 'comment');
+
       await ensureAuthenticated();
 
       const action = args.action as string;
@@ -732,6 +736,9 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
       required: ['tenant_id'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      if (args.copy_from_tenant) validateTenantId(args.copy_from_tenant, 'copy_from_tenant');
+
       await ensureAuthenticated();
 
       const inputTenantId = args.tenant_id as string;
