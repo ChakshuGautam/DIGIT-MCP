@@ -1583,6 +1583,10 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           type: 'object',
           description: 'The data payload for the record',
         },
+        dry_run: {
+          type: 'boolean',
+          description: 'If true, validate inputs and check prerequisites without executing. Returns a preview of what would happen.',
+        },
       },
       required: ['tenant_id', 'schema_code', 'unique_identifier', 'data'],
     },
@@ -1591,11 +1595,34 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       validateResourceId(args.schema_code as string, 'schema_code');
       validateResourceId(args.unique_identifier as string, 'unique_identifier');
 
-      await ensureAuthenticated();
-
       const tenantId = args.tenant_id as string;
       const schemaCode = args.schema_code as string;
       const uniqueIdentifier = args.unique_identifier as string;
+      const data = args.data as Record<string, unknown>;
+      const dryRun = args.dry_run === true;
+
+      if (dryRun) {
+        const issues: string[] = [];
+
+        if (!digitApi.isAuthenticated()) {
+          issues.push('Not authenticated. Call "configure" first.');
+        }
+
+        return JSON.stringify({
+          success: true,
+          dry_run: true,
+          valid: issues.length === 0,
+          issues,
+          preview: {
+            tenantId,
+            schemaCode,
+            uniqueIdentifier,
+            data,
+          },
+        }, null, 2);
+      }
+
+      await ensureAuthenticated();
 
       try {
         // Check if a record with this identifier already exists (may be inactive)

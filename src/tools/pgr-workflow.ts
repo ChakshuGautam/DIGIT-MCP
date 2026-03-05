@@ -139,6 +139,10 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
           type: 'string',
           description: 'Mobile number of the citizen (required, 10 digits)',
         },
+        dry_run: {
+          type: 'boolean',
+          description: 'If true, validate inputs and check prerequisites without executing. Returns a preview of what would happen.',
+        },
       },
       required: ['tenant_id', 'service_code', 'description', 'address', 'citizen_name', 'citizen_mobile'],
     },
@@ -151,11 +155,51 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
       validateStringLength(args.citizen_name as string, 200, 'citizen_name');
       validateResourceId(args.service_code as string, 'service_code');
 
-      await ensureAuthenticated();
-
       const tenantId = args.tenant_id as string;
+      const serviceCode = args.service_code as string;
+      const description = args.description as string;
       const citizenName = args.citizen_name as string;
       const citizenMobile = args.citizen_mobile as string;
+      const address = args.address as Record<string, unknown>;
+      const dryRun = args.dry_run === true;
+
+      if (dryRun) {
+        const issues: string[] = [];
+
+        // Check auth
+        if (!digitApi.isAuthenticated()) {
+          issues.push('Not authenticated. Call "configure" first.');
+        }
+
+        // Check complaint type exists
+        if (digitApi.isAuthenticated()) {
+          try {
+            const stateRoot = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
+            const types = await digitApi.mdmsV2Search(stateRoot, 'RAINMAKER-PGR.ServiceDefs');
+            const codes = types.map((t) => (t.data as Record<string, unknown>)?.serviceCode);
+            if (!codes.includes(serviceCode)) {
+              issues.push(`Service code "${serviceCode}" not found. Available: ${codes.slice(0, 10).join(', ')}`);
+            }
+          } catch { /* skip if can't check */ }
+        }
+
+        return JSON.stringify({
+          success: true,
+          dry_run: true,
+          valid: issues.length === 0,
+          issues,
+          preview: {
+            tenantId,
+            serviceCode,
+            description: description.slice(0, 100),
+            citizen: { name: citizenName, mobile: citizenMobile },
+            address,
+          },
+        }, null, 2);
+      }
+
+      await ensureAuthenticated();
+
       const env = digitApi.getEnvironmentInfo();
       const rootTenant = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
 

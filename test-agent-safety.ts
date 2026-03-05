@@ -14,6 +14,8 @@ import {
   validateToolInputs,
   ValidationError,
 } from './src/utils/validation.js';
+import { ToolRegistry } from './src/tools/registry.js';
+import { registerAllTools } from './src/tools/index.js';
 
 // --- Test runner (same pattern as test-validator.ts) ---
 
@@ -221,7 +223,98 @@ await test('6.2 fail on first invalid input', () => {
   );
 });
 
-// --- ADD SECTIONS 7-9 HERE AFTER IMPLEMENTING sanitize.ts, dry-run, field masks ---
+// =====================================================================
+// Section 7: Dry-Run Preview Mode
+// =====================================================================
+
+// --- Tool registry for dry-run tests ---
+const registry = new ToolRegistry();
+registerAllTools(registry);
+
+async function call(toolName: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const tool = registry.getTool(toolName);
+  if (!tool) throw new Error(`Tool "${toolName}" not registered`);
+  return JSON.parse(await tool.handler(args));
+}
+
+console.log('\n=== 7. Dry-Run Tests ===\n');
+
+await test('7.1 pgr_create dry_run returns preview without executing', async () => {
+  const r = await call('pgr_create', {
+    tenant_id: 'pg.citya',
+    service_code: 'StreetLightNotWorking',
+    description: 'Test dry run - no API call',
+    address: { locality: { code: 'LOC_1' } },
+    citizen_name: 'Test User',
+    citizen_mobile: '9876543210',
+    dry_run: true,
+  });
+  assert(r.success === true, 'dry_run should succeed');
+  assert(r.dry_run === true, 'should flag dry_run');
+  assert(typeof r.valid === 'boolean', 'should report validity');
+  assert(r.preview !== undefined, 'should include preview');
+  assert(Array.isArray(r.issues), 'should include issues array');
+});
+
+await test('7.2 employee_create dry_run returns preview', async () => {
+  const r = await call('employee_create', {
+    tenant_id: 'pg.citya',
+    name: 'Test Employee',
+    mobile_number: '9876543210',
+    roles: [{ code: 'EMPLOYEE', name: 'Employee' }],
+    department: 'DEPT_1',
+    designation: 'DESIG_1',
+    jurisdiction_boundary_type: 'City',
+    jurisdiction_boundary: 'pg.citya',
+    dry_run: true,
+  });
+  assert(r.success === true, 'dry_run should succeed');
+  assert(r.dry_run === true, 'should flag dry_run');
+  assert(r.preview !== undefined, 'should include preview');
+});
+
+await test('7.3 mdms_create dry_run returns preview', async () => {
+  const r = await call('mdms_create', {
+    tenant_id: 'pg',
+    schema_code: 'common-masters.Department',
+    unique_identifier: 'DEPT_TEST',
+    data: { code: 'DEPT_TEST', name: 'Test', active: true },
+    dry_run: true,
+  });
+  assert(r.success === true, 'dry_run should succeed');
+  assert(r.dry_run === true, 'should flag dry_run');
+});
+
+await test('7.4 localization_upsert dry_run returns preview', async () => {
+  const r = await call('localization_upsert', {
+    tenant_id: 'pg',
+    messages: [{ code: 'TEST_CODE', message: 'Test', module: 'test-module' }],
+    dry_run: true,
+  });
+  assert(r.success === true, 'dry_run should succeed');
+  assert(r.dry_run === true, 'should flag dry_run');
+  assert((r.preview as Record<string, unknown>)?.messageCount === 1, 'should show message count');
+});
+
+await test('7.5 dry_run with invalid input still catches validation errors', async () => {
+  try {
+    await call('pgr_create', {
+      tenant_id: 'INVALID!',
+      service_code: 'Test',
+      description: 'Test',
+      address: { locality: { code: 'LOC_1' } },
+      citizen_name: 'Test',
+      citizen_mobile: '123',
+      dry_run: true,
+    });
+    throw new Error('Expected validation error but call succeeded');
+  } catch (err) {
+    assert((err as Error).message.includes('tenant_id') || (err as Error).message.includes('invalid'),
+      'should throw validation error mentioning tenant_id');
+  }
+});
+
+// --- ADD SECTIONS 8-9 HERE AFTER IMPLEMENTING sanitize.ts, field masks ---
 
 // =====================================================================
 // Summary

@@ -78,6 +78,10 @@ export function registerHrmsTools(registry: ToolRegistry): void {
           enum: ['MALE', 'FEMALE', 'TRANSGENDER'],
           description: 'Optional gender',
         },
+        dry_run: {
+          type: 'boolean',
+          description: 'If true, validate inputs and check prerequisites without executing. Returns a preview of what would happen.',
+        },
       },
       required: ['tenant_id', 'name', 'mobile_number', 'roles', 'department', 'designation', 'jurisdiction_boundary_type', 'jurisdiction_boundary'],
     },
@@ -89,24 +93,68 @@ export function registerHrmsTools(registry: ToolRegistry): void {
       validateResourceId(args.department as string, 'department');
       validateResourceId(args.designation as string, 'designation');
 
+      const tenantId = args.tenant_id as string;
+      const name = args.name as string;
+      const mobileNumber = args.mobile_number as string;
+      const department = args.department as string;
+      const designation = args.designation as string;
+      const roles = args.roles as Array<{ code: string; name: string }>;
+      const jurisdictionBoundary = args.jurisdiction_boundary as string;
+      const dryRun = args.dry_run === true;
+
+      if (dryRun) {
+        const issues: string[] = [];
+
+        if (!digitApi.isAuthenticated()) {
+          issues.push('Not authenticated. Call "configure" first.');
+        }
+
+        // Check department exists
+        if (digitApi.isAuthenticated()) {
+          try {
+            const stateRoot = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
+            const depts = await digitApi.mdmsV2Search(stateRoot, 'common-masters.Department');
+            const deptCodes = depts.map((d) => (d.data as Record<string, unknown>)?.code);
+            if (!deptCodes.includes(department)) {
+              issues.push(`Department "${department}" not found. Available: ${deptCodes.slice(0, 10).join(', ')}`);
+            }
+          } catch { /* skip */ }
+        }
+
+        return JSON.stringify({
+          success: true,
+          dry_run: true,
+          valid: issues.length === 0,
+          issues,
+          preview: {
+            tenantId,
+            name,
+            mobileNumber,
+            department,
+            designation,
+            roles: roles.map((r) => r.code),
+            jurisdictionBoundary,
+          },
+        }, null, 2);
+      }
+
       await ensureAuthenticated();
 
-      const tenantId = args.tenant_id as string;
       const now = Date.now();
 
       // Derive role tenant from the target tenant's root (not env.stateTenantId)
       // e.g. "tenant.city1" → "tenant", "pg.citya" → "pg"
       const roleTenant = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
 
-      const roles = (args.roles as Array<{ code: string; name: string }>).map((r) => ({
+      const mappedRoles = roles.map((r) => ({
         code: r.code,
         name: r.name,
         tenantId: roleTenant,
       }));
 
       // Ensure EMPLOYEE role is present
-      if (!roles.some((r) => r.code === 'EMPLOYEE')) {
-        roles.push({ code: 'EMPLOYEE', name: 'Employee', tenantId: roleTenant });
+      if (!mappedRoles.some((r) => r.code === 'EMPLOYEE')) {
+        mappedRoles.push({ code: 'EMPLOYEE', name: 'Employee', tenantId: roleTenant });
       }
 
       const employee: Record<string, unknown> = {
@@ -124,7 +172,7 @@ export function registerHrmsTools(registry: ToolRegistry): void {
           gender: (args.gender as string) || null,
           type: 'EMPLOYEE',
           active: true,
-          roles,
+          roles: mappedRoles,
           tenantId: roleTenant,
         },
         assignments: [

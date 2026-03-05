@@ -89,6 +89,10 @@ export function registerLocalizationTools(registry: ToolRegistry): void {
           },
           description: 'Array of localization messages to upsert',
         },
+        dry_run: {
+          type: 'boolean',
+          description: 'If true, validate inputs and check prerequisites without executing. Returns a preview of what would happen.',
+        },
       },
       required: ['tenant_id', 'messages'],
     },
@@ -100,10 +104,32 @@ export function registerLocalizationTools(registry: ToolRegistry): void {
         rejectControlChars(msg.message, 'message.message');
       }
 
-      await ensureAuthenticated();
-
       const tenantId = args.tenant_id as string;
       const locale = (args.locale as string) || 'en_IN';
+      const dryRun = args.dry_run === true;
+
+      if (dryRun) {
+        const issues: string[] = [];
+
+        if (!digitApi.isAuthenticated()) {
+          issues.push('Not authenticated. Call "configure" first.');
+        }
+
+        return JSON.stringify({
+          success: true,
+          dry_run: true,
+          valid: issues.length === 0,
+          issues,
+          preview: {
+            tenantId,
+            locale,
+            messageCount: messages.length,
+            messages: messages.slice(0, 5),
+          },
+        }, null, 2);
+      }
+
+      await ensureAuthenticated();
 
       const result = await digitApi.localizationUpsert(tenantId, locale, messages);
 
