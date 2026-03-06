@@ -302,26 +302,22 @@ subcommand namespace (e.g. `digit newgroup command`).
 ```
 src/cli.ts                 Entry point. Builds Commander program from registry.
                            Guards execution with isMain check (importable by tests).
-                           ~195 LOC.
 
 src/cli/adapter.ts         JSON Schema → Commander option mapper.
                            toFlag(), toArgKey(), addSchemaOptions(), optsToArgs().
                            Handles string, number, boolean, enum, object, array.
-                           ~120 LOC.
 
 src/cli/formatter.ts       Output formatting: json, table, plain.
                            Auto-detects TTY. Table mode finds primary data array,
                            extracts scalar columns, aligns with padding.
-                           ~150 LOC.
 
 src/cli/auth.ts            Credential persistence.
                            saveCredentials(), loadCredentials(), clearCredentials(),
                            applyCredentialsToEnv(). File: ~/.config/digit-cli/credentials.json.
-                           ~80 LOC.
 
 test-cli.ts                96 tests covering adapter, formatter, auth, and
                            program structure. Verifies 1:1 tool mapping (56 CLI
                            commands = 56 non-MCP-only registry tools).
 ```
 
-Total: ~545 LOC of CLI-specific code. Zero changes to existing MCP server files.
+Zero changes to existing MCP server files.
