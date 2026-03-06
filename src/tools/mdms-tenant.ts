@@ -6,6 +6,8 @@ import { ENVIRONMENTS } from '../config/environments.js';
 import { autoPaginate, PAGINATION_SCHEMA_PROPERTIES } from '../utils/pagination.js';
 import type { PaginationOptions } from '../utils/pagination.js';
 import { buildOrderedLevels } from './validators.js';
+import { validateTenantId, validateResourceId } from '../utils/validation.js';
+import { applyFieldMask } from '../utils/field-mask.js';
 
 /**
  * Search for MDMS records across all state tenants.
@@ -578,6 +580,11 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           description: 'Offset for pagination (default: 0)',
         },
         ...PAGINATION_SCHEMA_PROPERTIES,
+        fields: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional: only return these fields per result. Available: uniqueIdentifier, data, isActive',
+        },
       },
       required: ['tenant_id', 'schema_code'],
     },
@@ -608,6 +615,14 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         });
       }
 
+      const fields = args.fields as string[] | undefined;
+      const mapped = records.map((r) => ({
+        uniqueIdentifier: r.uniqueIdentifier,
+        data: r.data,
+        isActive: r.isActive,
+      }));
+      const { items: masked, truncated } = applyFieldMask(mapped, fields);
+
       return JSON.stringify(
         {
           success: true,
@@ -615,11 +630,9 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           schemaCode: args.schema_code,
           count: records.length,
           ...(paginationMeta ? { pagination: paginationMeta } : {}),
-          records: records.map((r) => ({
-            uniqueIdentifier: r.uniqueIdentifier,
-            data: r.data,
-            isActive: r.isActive,
-          })),
+          records: masked,
+          truncated,
+          ...(fields ? { fieldsApplied: fields } : {}),
         },
         null,
         2
@@ -713,6 +726,10 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'code'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.code, 'code');
+      if (args.copy_from_tenant) validateTenantId(args.copy_from_tenant, 'copy_from_tenant');
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;
@@ -794,6 +811,9 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       required: ['target_tenant'],
     },
     handler: async (args) => {
+      validateTenantId(args.target_tenant, 'target_tenant');
+      if (args.source_tenant) validateTenantId(args.source_tenant, 'source_tenant');
+
       await ensureAuthenticated();
 
       const target = args.target_tenant as string;
@@ -1100,6 +1120,9 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'city_name'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      if (args.source_tenant) validateTenantId(args.source_tenant, 'source_tenant');
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;
@@ -1473,6 +1496,8 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       required: ['tenant_id'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;
@@ -1600,15 +1625,46 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           type: 'object',
           description: 'The data payload for the record',
         },
+        dry_run: {
+          type: 'boolean',
+          description: 'If true, validate inputs and check prerequisites without executing. Returns a preview of what would happen.',
+        },
       },
       required: ['tenant_id', 'schema_code', 'unique_identifier', 'data'],
     },
     handler: async (args) => {
-      await ensureAuthenticated();
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.schema_code as string, 'schema_code');
+      validateResourceId(args.unique_identifier as string, 'unique_identifier');
 
       const tenantId = args.tenant_id as string;
       const schemaCode = args.schema_code as string;
       const uniqueIdentifier = args.unique_identifier as string;
+      const data = args.data as Record<string, unknown>;
+      const dryRun = args.dry_run === true;
+
+      if (dryRun) {
+        const issues: string[] = [];
+
+        if (!digitApi.isAuthenticated()) {
+          issues.push('Not authenticated. Call "configure" first.');
+        }
+
+        return JSON.stringify({
+          success: true,
+          dry_run: true,
+          valid: issues.length === 0,
+          issues,
+          preview: {
+            tenantId,
+            schemaCode,
+            uniqueIdentifier,
+            data,
+          },
+        }, null, 2);
+      }
+
+      await ensureAuthenticated();
 
       try {
         // Check if a record with this identifier already exists (may be inactive)

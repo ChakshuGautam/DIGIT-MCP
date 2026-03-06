@@ -2,6 +2,7 @@ import type { ToolMetadata, ValidationResult } from '../types/index.js';
 import { MDMS_SCHEMAS } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
+import { validateTenantId, validateResourceId } from '../utils/validation.js';
 
 /**
  * Build an ordered list of boundary types from a hierarchy definition.
@@ -658,12 +659,17 @@ export function registerValidatorTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'boundaries'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      const boundaries = args.boundaries as { code: string; type: string; parent?: string }[];
+      for (const b of boundaries) {
+        validateResourceId(b.code, 'boundary.code');
+      }
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;
       const hierarchyType = (args.hierarchy_type as string) || 'ADMIN';
       const hierarchyDef = args.hierarchy_definition as string[] | undefined;
-      const boundaries = args.boundaries as { code: string; type: string; parent?: string }[];
 
       const results: {
         hierarchy: { action: string; detail?: unknown; error?: string };
