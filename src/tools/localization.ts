@@ -1,6 +1,9 @@
 import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
+import { validateTenantId, rejectControlChars } from '../utils/validation.js';
+import { sanitizeUserContent } from '../utils/sanitize.js';
+import { applyFieldMask } from '../utils/field-mask.js';
 
 export function registerLocalizationTools(registry: ToolRegistry): void {
   registry.register({
@@ -25,6 +28,11 @@ export function registerLocalizationTools(registry: ToolRegistry): void {
           type: 'string',
           description: 'Module filter (e.g. "rainmaker-pgr", "rainmaker-common")',
         },
+        fields: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional: only return these fields per result. Available: code, message, module',
+        },
       },
       required: ['tenant_id'],
     },
@@ -37,6 +45,14 @@ export function registerLocalizationTools(registry: ToolRegistry): void {
 
       const messages = await digitApi.localizationSearch(tenantId, locale, module);
 
+      const fields = args.fields as string[] | undefined;
+      const mapped = messages.map((m) => ({
+        code: m.code,
+        message: sanitizeUserContent(m.message as string),
+        module: m.module,
+      }));
+      const { items: masked, truncated } = applyFieldMask(mapped, fields);
+
       return JSON.stringify(
         {
           success: true,
@@ -44,12 +60,9 @@ export function registerLocalizationTools(registry: ToolRegistry): void {
           locale,
           module: module || '(all)',
           count: messages.length,
-          messages: messages.slice(0, 100).map((m) => ({
-            code: m.code,
-            message: m.message,
-            module: m.module,
-          })),
-          truncated: messages.length > 100,
+          messages: masked,
+          truncated,
+          ...(fields ? { fieldsApplied: fields } : {}),
         },
         null,
         2
@@ -88,15 +101,47 @@ export function registerLocalizationTools(registry: ToolRegistry): void {
           },
           description: 'Array of localization messages to upsert',
         },
+        dry_run: {
+          type: 'boolean',
+          description: 'If true, validate inputs and check prerequisites without executing. Returns a preview of what would happen.',
+        },
       },
       required: ['tenant_id', 'messages'],
     },
     handler: async (args) => {
-      await ensureAuthenticated();
+      validateTenantId(args.tenant_id, 'tenant_id');
+      const messages = args.messages as { code: string; message: string; module: string }[];
+      for (const msg of messages) {
+        rejectControlChars(msg.code, 'message.code');
+        rejectControlChars(msg.message, 'message.message');
+      }
 
       const tenantId = args.tenant_id as string;
       const locale = (args.locale as string) || 'en_IN';
-      const messages = args.messages as { code: string; message: string; module: string }[];
+      const dryRun = args.dry_run === true;
+
+      if (dryRun) {
+        const issues: string[] = [];
+
+        if (!digitApi.isAuthenticated()) {
+          issues.push('Not authenticated. Call "configure" first.');
+        }
+
+        return JSON.stringify({
+          success: true,
+          dry_run: true,
+          valid: issues.length === 0,
+          issues,
+          preview: {
+            tenantId,
+            locale,
+            messageCount: messages.length,
+            messages: messages.slice(0, 5),
+          },
+        }, null, 2);
+      }
+
+      await ensureAuthenticated();
 
       const result = await digitApi.localizationUpsert(tenantId, locale, messages);
 
