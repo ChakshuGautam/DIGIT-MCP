@@ -59,4 +59,20 @@ describe('DigitApiClient', () => {
     assert.equal(info.token, 'tok');
     assert.equal(info.user?.userName, 'a');
   });
+
+  it('exposes boundaryUpdate endpoint', () => {
+    assert.equal(client.endpoint('BOUNDARY_UPDATE'), '/boundary-service/boundary/_update');
+  });
+
+  it('exposes boundaryDelete endpoint', () => {
+    assert.equal(client.endpoint('BOUNDARY_DELETE'), '/boundary-service/boundary/_delete');
+  });
+
+  it('exposes boundaryRelationshipDelete endpoint', () => {
+    assert.equal(client.endpoint('BOUNDARY_RELATIONSHIP_DELETE'), '/boundary-service/boundary-relationships/_delete');
+  });
+
+  it('exposes localizationDelete endpoint', () => {
+    assert.equal(client.endpoint('LOCALIZATION_DELETE'), '/localization/messages/v1/_delete');
+  });
 });

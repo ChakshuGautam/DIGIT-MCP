@@ -143,21 +143,45 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
     async getOne(resource, params): Promise<GetOneResult> {
       const config = resolveConfig(resource);
       if (config.type === 'mdms') {
+        // Try uniqueIdentifier lookup first (fast path for records we created)
         const records = await client.mdmsSearch(tenantId, config.schema!, { uniqueIdentifiers: [String(params.id)] });
         const active = records.filter((r) => r.isActive);
-        if (!active.length) throw new Error(`Record not found: ${params.id}`);
-        return { data: normalizeMdmsRecord(active[0], config) };
+        if (active.length) return { data: normalizeMdmsRecord(active[0], config) };
+        // Fall back to fetching all and matching by id field (handles hash-based UIDs)
+        const all = await mdmsGetList(client, config, tenantId);
+        const found = all.find((r) => String(r.id) === String(params.id));
+        if (!found) throw new Error(`Record not found: ${params.id}`);
+        return { data: found };
       }
       if (config.type === 'hrms') {
-        const employees = await client.employeeSearch(tenantId, { codes: [String(params.id)] });
-        if (!employees.length) throw new Error(`Employee not found: ${params.id}`);
-        return { data: normalizeRecord(employees[0], config) };
+        // idField is 'uuid', so search by uuids first; fall back to codes for backward compat
+        const byUuid = await client.employeeSearch(tenantId, { uuids: [String(params.id)] });
+        if (byUuid.length) return { data: normalizeRecord(byUuid[0], config) };
+        const byCodes = await client.employeeSearch(tenantId, { codes: [String(params.id)] });
+        if (byCodes.length) return { data: normalizeRecord(byCodes[0], config) };
+        throw new Error(`Employee not found: ${params.id}`);
       }
       if (config.type === 'pgr') {
         const wrappers = await client.pgrSearch(tenantId, { serviceRequestId: String(params.id) });
         if (!wrappers.length) throw new Error(`Complaint not found: ${params.id}`);
         const service = (wrappers[0].service || wrappers[0]) as Record<string, unknown>;
         return { data: normalizeRecord(service, config) };
+      }
+      if (config.type === 'boundary') {
+        // Search entity table directly to get full data (additionalDetails, geometry, auditDetails)
+        const entities = await client.boundarySearch(tenantId, [String(params.id)]);
+        if (entities.length) {
+          // Merge with tree data (boundaryType, parentCode) if available
+          const all = await fetchAll(resource);
+          const treeNode = all.find((r) => String(r.id) === String(params.id));
+          const merged = { ...(treeNode || {}), ...entities[0], id: String(params.id) };
+          return { data: normalizeRecord(merged as Record<string, unknown>, config) };
+        }
+        // Fall back to tree-only data
+        const all = await fetchAll(resource);
+        const found = all.find((r) => String(r.id) === String(params.id));
+        if (!found) throw new Error(`Record not found: ${params.id}`);
+        return { data: found };
       }
       const all = await fetchAll(resource);
       const found = all.find((r) => String(r.id) === String(params.id));
@@ -168,10 +192,16 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
     async getMany(resource, params): Promise<GetManyResult> {
       const config = resolveConfig(resource);
       if (config.type === 'mdms') {
+        // Try uniqueIdentifier lookup first (fast path)
         const records = await client.mdmsSearch(tenantId, config.schema!, {
           uniqueIdentifiers: params.ids.map(String),
         });
-        return { data: records.filter((r) => r.isActive).map((r) => normalizeMdmsRecord(r, config)) };
+        const found = records.filter((r) => r.isActive).map((r) => normalizeMdmsRecord(r, config));
+        if (found.length === params.ids.length) return { data: found };
+        // Fall back to fetching all and matching by id field (handles hash-based UIDs)
+        const all = await mdmsGetList(client, config, tenantId);
+        const ids = new Set(params.ids.map(String));
+        return { data: all.filter((r) => ids.has(String(r.id))) };
       }
       const all = await fetchAll(resource);
       const ids = new Set(params.ids.map(String));
@@ -202,6 +232,53 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
         const [employee] = await client.employeeCreate(tenantId, [params.data as Record<string, unknown>]);
         return { data: normalizeRecord(employee, config) };
       }
+      if (config.type === 'pgr') {
+        const data = params.data as Record<string, unknown>;
+        const wrapper = await client.pgrCreate(
+          tenantId,
+          String(data.serviceCode),
+          String(data.description || ''),
+          (data.address || { locality: { code: '' } }) as Record<string, unknown>,
+          data.citizen as Record<string, unknown> | undefined,
+        );
+        const service = ((wrapper as Record<string, unknown>).service || wrapper) as Record<string, unknown>;
+        return { data: normalizeRecord(service, config) };
+      }
+      if (config.type === 'localization') {
+        const data = params.data as Record<string, unknown>;
+        const messages = await client.localizationUpsert(tenantId, String(data.locale || 'en_IN'), [
+          { code: String(data.code), message: String(data.message), module: String(data.module) },
+        ]);
+        if (messages.length) return { data: normalizeRecord(messages[0], config) };
+        return { data: { ...data, id: String(data.code) } as RaRecord };
+      }
+      if (config.type === 'boundary') {
+        const data = params.data as Record<string, unknown>;
+        const code = String(data.code);
+        const boundaryType = String(data.boundaryType || 'Locality');
+        const hierarchyType = String(data.hierarchyType || 'ADMIN');
+        const parent = data.parent ? String(data.parent) : null;
+        // Create the boundary entity (publishes to Kafka for async persistence)
+        await client.boundaryCreate(tenantId, [{ code }]);
+        // Retry relationship create — entity may not be persisted yet (Kafka async)
+        let lastErr: Error | null = null;
+        for (let attempt = 0; attempt < 5; attempt++) {
+          try {
+            await client.boundaryRelationshipCreate(tenantId, code, hierarchyType, boundaryType, parent);
+            lastErr = null;
+            break;
+          } catch (err) {
+            lastErr = err as Error;
+            if (lastErr.message?.includes('does not exist') && attempt < 4) {
+              await new Promise((r) => setTimeout(r, 500));
+              continue;
+            }
+            throw err;
+          }
+        }
+        if (lastErr) throw lastErr;
+        return { data: { ...data, id: code, code, boundaryType } as RaRecord };
+      }
       throw new Error(`Create not supported for resource type: ${config.type}`);
     },
 
@@ -218,6 +295,42 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
       if (config.type === 'hrms') {
         const [employee] = await client.employeeUpdate(tenantId, [params.data as Record<string, unknown>]);
         return { data: normalizeRecord(employee, config) };
+      }
+      if (config.type === 'pgr') {
+        const data = params.data as Record<string, unknown>;
+        const action = String(data.action || data._action || 'ASSIGN');
+        // Fetch current service state
+        const wrappers = await client.pgrSearch(tenantId, { serviceRequestId: String(params.id) });
+        if (!wrappers.length) throw new Error(`Complaint not found: ${params.id}`);
+        const service = ((wrappers[0] as Record<string, unknown>).service || wrappers[0]) as Record<string, unknown>;
+        const updated = await client.pgrUpdate(service, action, {
+          comment: data.comment as string | undefined,
+          assignees: data.assignees as string[] | undefined,
+          rating: data.rating as number | undefined,
+        });
+        const updatedService = ((updated as Record<string, unknown>).service || updated) as Record<string, unknown>;
+        return { data: normalizeRecord(updatedService, config) };
+      }
+      if (config.type === 'localization') {
+        const data = params.data as Record<string, unknown>;
+        const messages = await client.localizationUpsert(tenantId, String(data.locale || 'en_IN'), [
+          { code: String(data.code || params.id), message: String(data.message), module: String(data.module) },
+        ]);
+        if (messages.length) return { data: normalizeRecord(messages[0], config) };
+        return { data: { ...data, id: String(data.code || params.id) } as RaRecord };
+      }
+      if (config.type === 'boundary') {
+        const data = params.data as Record<string, unknown>;
+        const code = String(data.code || params.id);
+        // Fetch existing boundary to get auditDetails (required by _update)
+        const existing = await client.boundarySearch(tenantId, [code]);
+        const current = existing.length ? existing[0] as Record<string, unknown> : {};
+        const merged: Record<string, unknown> = { ...current, code };
+        if (data.additionalDetails !== undefined) merged.additionalDetails = data.additionalDetails;
+        if (data.geometry !== undefined) merged.geometry = data.geometry;
+        const updated = await client.boundaryUpdate(tenantId, [merged]);
+        if (updated.length) return { data: normalizeRecord(updated[0], config) };
+        return { data: { ...data, id: code } as RaRecord };
       }
       throw new Error(`Update not supported for resource type: ${config.type}`);
     },
@@ -239,6 +352,58 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
         if (!existing) throw new Error(`Record not found: ${params.id}`);
         await client.mdmsUpdate(existing, false);
         return { data: normalizeMdmsRecord(existing, config) };
+      }
+      if (config.type === 'hrms') {
+        // Search by UUID first (idField is 'uuid'), fall back to codes
+        let results = await client.employeeSearch(tenantId, { uuids: [String(params.id)] });
+        if (!results.length) results = await client.employeeSearch(tenantId, { codes: [String(params.id)] });
+        if (!results.length) throw new Error(`Employee not found: ${params.id}`);
+        let emp = results[0] as Record<string, unknown>;
+        // If user is null (UUID search may omit user), re-fetch by code to get full object
+        if (!emp.user && emp.code) {
+          const byCode = await client.employeeSearch(tenantId, { codes: [emp.code as string] });
+          if (byCode.length) emp = byCode[0] as Record<string, unknown>;
+        }
+        emp.isActive = false;
+        emp.deactivationDetails = [{ reasonForDeactivation: 'OTHERS', effectiveFrom: Date.now() }];
+        const [updated] = await client.employeeUpdate(tenantId, [emp]);
+        return { data: normalizeRecord(updated, config) };
+      }
+      if (config.type === 'pgr') {
+        // "Delete" a complaint by rejecting it via workflow
+        const wrappers = await client.pgrSearch(tenantId, { serviceRequestId: String(params.id) });
+        if (!wrappers.length) throw new Error(`Complaint not found: ${params.id}`);
+        const service = ((wrappers[0] as Record<string, unknown>).service || wrappers[0]) as Record<string, unknown>;
+        const appStatus = String(service.applicationStatus || '');
+        // If already in a terminal state, return as-is
+        if (['REJECTED', 'CLOSEDAFTERRESOLUTION'].includes(appStatus)) {
+          return { data: normalizeRecord(service, config) };
+        }
+        // Reject the complaint (GRO action, works from PENDINGFORASSIGNMENT)
+        const updated = await client.pgrUpdate(service, 'REJECT', { comment: 'Deleted via DataProvider' });
+        const updatedService = ((updated as Record<string, unknown>).service || updated) as Record<string, unknown>;
+        return { data: normalizeRecord(updatedService, config) };
+      }
+      if (config.type === 'localization') {
+        const all = await fetchAll('localization');
+        const record = all.find((r) => String(r.id) === String(params.id));
+        if (!record) throw new Error(`Localization message not found: ${params.id}`);
+        const loc = record as unknown as Record<string, unknown>;
+        await client.localizationDelete(tenantId, String(loc.locale || 'en_IN'), [
+          { code: String(loc.code), module: String(loc.module) },
+        ]);
+        return { data: record };
+      }
+      if (config.type === 'boundary') {
+        const all = await fetchAll('boundaries');
+        const record = all.find((r) => String(r.id) === String(params.id));
+        if (!record) throw new Error(`Boundary not found: ${params.id}`);
+        const code = String(params.id);
+        try {
+          await client.boundaryRelationshipDelete(tenantId, code, 'ADMIN');
+        } catch { /* relationship may not exist */ }
+        await client.boundaryDelete(tenantId, [code]);
+        return { data: record };
       }
       throw new Error(`Delete not supported for resource type: ${config.type}`);
     },

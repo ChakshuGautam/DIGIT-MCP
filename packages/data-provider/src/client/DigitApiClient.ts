@@ -234,10 +234,11 @@ export class DigitApiClient {
   // --- HRMS ---
 
   async employeeSearch(tenantId: string, options?: {
-    codes?: string[]; departments?: string[]; limit?: number; offset?: number;
+    codes?: string[]; uuids?: string[]; departments?: string[]; limit?: number; offset?: number;
   }): Promise<Record<string, unknown>[]> {
     const params = new URLSearchParams({ tenantId });
     if (options?.codes?.length) params.append('codes', options.codes.join(','));
+    if (options?.uuids?.length) params.append('uuids', options.uuids.join(','));
     if (options?.departments?.length) params.append('departments', options.departments.join(','));
     params.append('limit', String(options?.limit || 100));
     params.append('offset', String(options?.offset || 0));
@@ -265,11 +266,21 @@ export class DigitApiClient {
 
   // --- Boundary ---
 
-  async boundarySearch(tenantId: string, hierarchyType?: string, options?: { limit?: number; offset?: number }): Promise<Record<string, unknown>[]> {
-    const boundary: Record<string, unknown> = { tenantId, limit: options?.limit || 100, offset: options?.offset || 0 };
-    if (hierarchyType) boundary.hierarchyType = hierarchyType;
-    const data = await this.request<{ Boundary?: Record<string, unknown>[] }>(this.endpoint('BOUNDARY_SEARCH'), {
-      RequestInfo: this.buildRequestInfo(), Boundary: boundary,
+  async boundarySearch(tenantId: string, codesOrHierarchyType?: string | string[], options?: { limit?: number; offset?: number }): Promise<Record<string, unknown>[]> {
+    // Support searching by codes (array) or hierarchy type (string)
+    const isCodes = Array.isArray(codesOrHierarchyType);
+    // Spring @ModelAttribute reads ALL fields from query params
+    const queryParams = new URLSearchParams();
+    queryParams.set('tenantId', tenantId);
+    queryParams.set('limit', String(options?.limit || 100));
+    queryParams.set('offset', String(options?.offset || 0));
+    if (isCodes && codesOrHierarchyType.length) {
+      // Spring binds repeated params: ?codes=A&codes=B (NOT comma-separated)
+      for (const code of codesOrHierarchyType) queryParams.append('codes', code);
+    }
+    const url = `${this.endpoint('BOUNDARY_SEARCH')}?${queryParams.toString()}`;
+    const data = await this.request<{ Boundary?: Record<string, unknown>[] }>(url, {
+      RequestInfo: this.buildRequestInfo(),
     });
     return data.Boundary || [];
   }
@@ -311,6 +322,30 @@ export class DigitApiClient {
     const data = await this.request<{ BoundaryRelationship?: Record<string, unknown> }>(this.endpoint('BOUNDARY_RELATIONSHIP_CREATE'), {
       RequestInfo: this.buildRequestInfo(),
       BoundaryRelationship: { tenantId, code, hierarchyType, boundaryType, parent: parent || undefined },
+    });
+    return data.BoundaryRelationship || {};
+  }
+
+  async boundaryUpdate(tenantId: string, boundaries: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ Boundary?: Record<string, unknown>[] }>(this.endpoint('BOUNDARY_UPDATE'), {
+      RequestInfo: this.buildRequestInfo(),
+      Boundary: boundaries.map((b) => ({ ...b, tenantId })),
+    });
+    return data.Boundary || [];
+  }
+
+  async boundaryDelete(tenantId: string, boundaryCodes: string[]): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ Boundary?: Record<string, unknown>[] }>(this.endpoint('BOUNDARY_DELETE'), {
+      RequestInfo: this.buildRequestInfo(),
+      Boundary: boundaryCodes.map((code) => ({ tenantId, code })),
+    });
+    return data.Boundary || [];
+  }
+
+  async boundaryRelationshipDelete(tenantId: string, code: string, hierarchyType: string): Promise<Record<string, unknown>> {
+    const data = await this.request<{ BoundaryRelationship?: Record<string, unknown> }>(this.endpoint('BOUNDARY_RELATIONSHIP_DELETE'), {
+      RequestInfo: this.buildRequestInfo(),
+      BoundaryRelationship: { tenantId, code, hierarchyType },
     });
     return data.BoundaryRelationship || {};
   }
@@ -378,6 +413,15 @@ export class DigitApiClient {
       { RequestInfo: this.buildRequestInfo(), tenantId, messages: messages.map((m) => ({ ...m, locale })) },
     );
     return data.messages || [];
+  }
+
+  async localizationDelete(tenantId: string, locale: string, messages: { code: string; module: string }[]): Promise<boolean> {
+    const data = await this.request<{ successful?: boolean }>(this.endpoint('LOCALIZATION_DELETE'), {
+      RequestInfo: this.buildRequestInfo(),
+      tenantId,
+      messages: messages.map((m) => ({ code: m.code, module: m.module, locale })),
+    });
+    return data.successful === true;
   }
 
   // --- Workflow ---
