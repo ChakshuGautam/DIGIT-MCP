@@ -1,6 +1,8 @@
 import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
+import { autoPaginate, PAGINATION_SCHEMA_PROPERTIES } from '../utils/pagination.js';
+import type { PaginationOptions } from '../utils/pagination.js';
 
 export function registerPgrWorkflowTools(registry: ToolRegistry): void {
   // ──────────────────────────────────────────
@@ -32,24 +34,45 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         },
         limit: { type: 'number', description: 'Max results (default: 50)' },
         offset: { type: 'number', description: 'Offset for pagination (default: 0)' },
+        ...PAGINATION_SCHEMA_PROPERTIES,
       },
       required: ['tenant_id'],
     },
     handler: async (args) => {
       await ensureAuthenticated();
 
-      const complaints = await digitApi.pgrSearch(args.tenant_id as string, {
+      const tenantId = args.tenant_id as string;
+      const searchOpts = {
         serviceRequestId: args.service_request_id as string | undefined,
         status: args.status as string | undefined,
-        limit: (args.limit as number) || 50,
-        offset: (args.offset as number) || 0,
-      });
+      };
+      const pageOpts = args as PaginationOptions;
+
+      let complaints: Record<string, unknown>[];
+      let paginationMeta: Record<string, unknown> | undefined;
+
+      if (pageOpts.page_all) {
+        const result = await autoPaginate(
+          (limit, offset) => digitApi.pgrSearch(tenantId, { ...searchOpts, limit, offset }),
+          pageOpts,
+          50,
+        );
+        complaints = result.items;
+        paginationMeta = { totalFetched: result.totalFetched, pages: result.pages, truncated: result.truncated };
+      } else {
+        complaints = await digitApi.pgrSearch(tenantId, {
+          ...searchOpts,
+          limit: (args.limit as number) || 50,
+          offset: (args.offset as number) || 0,
+        });
+      }
 
       return JSON.stringify(
         {
           success: true,
           tenantId: args.tenant_id,
           count: complaints.length,
+          ...(paginationMeta ? { pagination: paginationMeta } : {}),
           complaints: complaints.map((sw) => {
             const svc = sw.service as Record<string, unknown> | undefined;
             const wf = sw.workflow as Record<string, unknown> | undefined;
@@ -563,26 +586,41 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         },
         limit: { type: 'number', description: 'Max results (default: 50)' },
         offset: { type: 'number', description: 'Offset (default: 0)' },
+        ...PAGINATION_SCHEMA_PROPERTIES,
       },
       required: ['tenant_id'],
     },
     handler: async (args) => {
       await ensureAuthenticated();
 
-      const processes = await digitApi.workflowProcessSearch(
-        args.tenant_id as string,
-        args.business_ids as string[] | undefined,
-        {
+      const tenantId = args.tenant_id as string;
+      const businessIds = args.business_ids as string[] | undefined;
+      const pageOpts = args as PaginationOptions;
+
+      let processes: Record<string, unknown>[];
+      let paginationMeta: Record<string, unknown> | undefined;
+
+      if (pageOpts.page_all) {
+        const result = await autoPaginate(
+          (limit, offset) => digitApi.workflowProcessSearch(tenantId, businessIds, { limit, offset }),
+          pageOpts,
+          50,
+        );
+        processes = result.items;
+        paginationMeta = { totalFetched: result.totalFetched, pages: result.pages, truncated: result.truncated };
+      } else {
+        processes = await digitApi.workflowProcessSearch(tenantId, businessIds, {
           limit: (args.limit as number) || 50,
           offset: (args.offset as number) || 0,
-        }
-      );
+        });
+      }
 
       return JSON.stringify(
         {
           success: true,
           tenantId: args.tenant_id,
           count: processes.length,
+          ...(paginationMeta ? { pagination: paginationMeta } : {}),
           processInstances: processes.map((p) => ({
             id: p.id,
             businessId: p.businessId,

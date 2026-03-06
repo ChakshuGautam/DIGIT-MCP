@@ -1,8 +1,10 @@
-import type { ToolMetadata } from '../types/index.js';
+import type { ToolMetadata, MdmsRecord } from '../types/index.js';
 import { MDMS_SCHEMAS } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
 import { ENVIRONMENTS } from '../config/environments.js';
+import { autoPaginate, PAGINATION_SCHEMA_PROPERTIES } from '../utils/pagination.js';
+import type { PaginationOptions } from '../utils/pagination.js';
 import { buildOrderedLevels } from './validators.js';
 
 /**
@@ -575,21 +577,36 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           type: 'number',
           description: 'Offset for pagination (default: 0)',
         },
+        ...PAGINATION_SCHEMA_PROPERTIES,
       },
       required: ['tenant_id', 'schema_code'],
     },
     handler: async (args) => {
       await ensureAuthenticated();
 
-      const records = await digitApi.mdmsV2SearchRaw(
-        args.tenant_id as string,
-        args.schema_code as string,
-        {
+      const tenantId = args.tenant_id as string;
+      const schemaCode = args.schema_code as string;
+      const uniqueIdentifiers = args.unique_identifiers as string[] | undefined;
+      const pageOpts = args as PaginationOptions;
+
+      let records: MdmsRecord[];
+      let paginationMeta: Record<string, unknown> | undefined;
+
+      if (pageOpts.page_all) {
+        const result = await autoPaginate(
+          (limit, offset) => digitApi.mdmsV2SearchRaw(tenantId, schemaCode, { limit, offset, uniqueIdentifiers }),
+          pageOpts,
+          100,
+        );
+        records = result.items;
+        paginationMeta = { totalFetched: result.totalFetched, pages: result.pages, truncated: result.truncated };
+      } else {
+        records = await digitApi.mdmsV2SearchRaw(tenantId, schemaCode, {
           limit: (args.limit as number) || 100,
           offset: (args.offset as number) || 0,
-          uniqueIdentifiers: args.unique_identifiers as string[] | undefined,
-        }
-      );
+          uniqueIdentifiers,
+        });
+      }
 
       return JSON.stringify(
         {
@@ -597,6 +614,7 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           tenantId: args.tenant_id,
           schemaCode: args.schema_code,
           count: records.length,
+          ...(paginationMeta ? { pagination: paginationMeta } : {}),
           records: records.map((r) => ({
             uniqueIdentifier: r.uniqueIdentifier,
             data: r.data,
