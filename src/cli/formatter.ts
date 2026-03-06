@@ -14,12 +14,13 @@ export function shouldColor(): boolean {
   if (process.env.NO_COLOR !== undefined) return false;
   if (process.env.TERM === 'dumb') return false;
   if (process.argv.includes('--no-color')) return false;
-  return !!process.stdout.isTTY;
+  // Check stdout first, fall back to stderr (npx tsx may not set stdout.isTTY)
+  return !!(process.stdout.isTTY || process.stderr.isTTY);
 }
 
 /** Detect default output format based on TTY. */
 export function defaultFormat(): OutputFormat {
-  return process.stdout.isTTY ? 'table' : 'json';
+  return (process.stdout.isTTY || process.stderr.isTTY) ? 'table' : 'json';
 }
 
 /** Format and print a tool handler's JSON result string. */
