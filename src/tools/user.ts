@@ -1,6 +1,8 @@
 import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
+import { autoPaginate, PAGINATION_SCHEMA_PROPERTIES } from '../utils/pagination.js';
+import type { PaginationOptions } from '../utils/pagination.js';
 import { validateTenantId, validateMobileNumber, rejectControlChars, validateStringLength } from '../utils/validation.js';
 import { sanitizeUserContent } from '../utils/sanitize.js';
 import { applyFieldMask } from '../utils/field-mask.js';
@@ -47,6 +49,7 @@ export function registerUserTools(registry: ToolRegistry): void {
         },
         limit: { type: 'number', description: 'Max results (default: 100)' },
         offset: { type: 'number', description: 'Offset for pagination (default: 0)' },
+        ...PAGINATION_SCHEMA_PROPERTIES,
         fields: {
           type: 'array',
           items: { type: 'string' },
@@ -59,15 +62,34 @@ export function registerUserTools(registry: ToolRegistry): void {
       await ensureAuthenticated();
 
       try {
-        const users = await digitApi.userSearch(args.tenant_id as string, {
+        const tenantId = args.tenant_id as string;
+        const searchOpts = {
           userName: args.user_name as string | undefined,
           mobileNumber: args.mobile_number as string | undefined,
           uuid: args.uuid as string[] | undefined,
           roleCodes: args.role_codes as string[] | undefined,
           userType: args.user_type as string | undefined,
-          limit: (args.limit as number) || 100,
-          offset: (args.offset as number) || 0,
-        });
+        };
+        const pageOpts = args as PaginationOptions;
+
+        let users: Record<string, unknown>[];
+        let paginationMeta: Record<string, unknown> | undefined;
+
+        if (pageOpts.page_all) {
+          const result = await autoPaginate(
+            (limit, offset) => digitApi.userSearch(tenantId, { ...searchOpts, limit, offset }),
+            pageOpts,
+            100,
+          );
+          users = result.items;
+          paginationMeta = { totalFetched: result.totalFetched, pages: result.pages, truncated: result.truncated };
+        } else {
+          users = await digitApi.userSearch(tenantId, {
+            ...searchOpts,
+            limit: (args.limit as number) || 100,
+            offset: (args.offset as number) || 0,
+          });
+        }
 
         const fields = args.fields as string[] | undefined;
         const mapped = users.map((u) => ({
@@ -93,6 +115,7 @@ export function registerUserTools(registry: ToolRegistry): void {
             success: true,
             tenantId: args.tenant_id,
             count: users.length,
+            ...(paginationMeta ? { pagination: paginationMeta } : {}),
             users: masked,
             truncated,
             ...(fields ? { fieldsApplied: fields } : {}),
