@@ -19,7 +19,7 @@ const HINT_RULES: HintRule[] = [
     hint: "Call configure with your credentials before making API calls.",
   },
   {
-    pattern: /tool.*"([^"]+)".*group.*"([^"]+)".*not.*enabled/i,
+    pattern: /group.*not.*enabled|not.*currently.*enabled/i,
     hint: "Call enable_tools with the required group.",
   },
   {
