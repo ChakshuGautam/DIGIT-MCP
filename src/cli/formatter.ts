@@ -124,25 +124,34 @@ function formatArrayAsTable(arr: Record<string, unknown>[], label: string): stri
     return JSON.stringify(arr, null, 2);
   }
 
-  // Build rows
-  const rows: string[][] = [columns.map((c) => c.toUpperCase())];
+  // Build rows (raw text for width calculation)
+  const headers = columns.map((col) => col.toUpperCase());
+  const dataRows: string[][] = [];
   for (const item of arr) {
-    rows.push(columns.map((c) => formatCell(item[c])));
+    dataRows.push(columns.map((col) => formatCell(item[col])));
   }
 
-  // Calculate column widths
+  // Calculate column widths from raw text (before color codes)
+  const allRows = [headers, ...dataRows];
   const widths = columns.map((_, i) =>
-    Math.min(40, Math.max(...rows.map((r) => r[i].length)))
+    Math.min(40, Math.max(...allRows.map((r) => r[i].length)))
   );
 
-  // Render
+  // Render with color
   const lines: string[] = [];
-  for (let r = 0; r < rows.length; r++) {
-    const cells = rows[r].map((cell, i) => cell.padEnd(widths[i]));
+
+  // Header row — bold
+  const headerCells = headers.map((h, i) => c(BOLD, h.padEnd(widths[i])));
+  lines.push(headerCells.join('  '));
+  lines.push(c(DIM, widths.map((w) => '─'.repeat(w)).join('──')));
+
+  // Data rows — color-code status-like values
+  for (const row of dataRows) {
+    const cells = row.map((cell, i) => {
+      const padded = cell.padEnd(widths[i]);
+      return colorizeValue(padded, columns[i]);
+    });
     lines.push(cells.join('  '));
-    if (r === 0) {
-      lines.push(widths.map((w) => '─'.repeat(w)).join('──'));
-    }
   }
 
   const countLine = arr.length > 1 ? `\n${c(DIM, `${arr.length} ${label}`)}` : '';
@@ -188,6 +197,31 @@ function c(code: string, text: string): string {
 }
 
 const RED = '\x1b[31m';
+const GREEN = '\x1b[32m';
 const YELLOW = '\x1b[33m';
+const CYAN = '\x1b[36m';
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
+
+/** Color-code values based on column name and content. */
+function colorizeValue(padded: string, column: string): string {
+  const val = padded.trim();
+  const col = column.toLowerCase();
+
+  // Status columns — green for resolved/active, red for rejected, yellow for pending
+  if (col === 'status' || col === 'applicationstatus') {
+    if (val.startsWith('RESOLVED') || val.startsWith('CLOSEDAFTER') || val === 'active' || val === 'true') return c(GREEN, padded);
+    if (val.startsWith('REJECTED') || val === 'inactive' || val === 'false') return c(RED, padded);
+    if (val.startsWith('PENDING')) return c(YELLOW, padded);
+  }
+
+  // Boolean-like columns
+  if (val === 'true' || val === 'OK') return c(GREEN, padded);
+  if (val === 'false' || val === 'CRITICAL') return c(RED, padded);
+  if (val === 'WARN') return c(YELLOW, padded);
+
+  // ID columns — cyan for readability
+  if ((col.endsWith('id') || col.endsWith('code')) && val.length > 8) return c(CYAN, padded);
+
+  return padded;
+}
