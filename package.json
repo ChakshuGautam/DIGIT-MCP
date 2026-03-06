@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "DIGIT platform MCP server + CLI — 60 tools for tenant management, PGR, HRMS, and more",
   "type": "module",
+  "workspaces": ["packages/*"],
   "main": "dist/index.js",
   "repository": {
     "type": "git",
