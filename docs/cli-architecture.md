@@ -228,6 +228,17 @@ $ digit pgr search --tenant-id pg.citya --output plain
 2 complaints
 ```
 
+**Color control.**
+ANSI color codes are used sparingly (red errors, yellow hints, dim counts).
+Color is automatically disabled when:
+
+- `NO_COLOR` env var is set (any value) — per https://no-color.org
+- `TERM=dumb`
+- `--no-color` flag is passed
+- stdout is not a TTY (piped output)
+
+All errors go to stderr, including JSON-formatted errors.
+
 ---
 
 ## 6. Credential Persistence

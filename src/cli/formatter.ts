@@ -9,6 +9,14 @@
 
 export type OutputFormat = 'json' | 'table' | 'plain';
 
+/** Whether color output should be used (respects NO_COLOR, TERM=dumb, --no-color). */
+export function shouldColor(): boolean {
+  if (process.env.NO_COLOR !== undefined) return false;
+  if (process.env.TERM === 'dumb') return false;
+  if (process.argv.includes('--no-color')) return false;
+  return !!process.stdout.isTTY;
+}
+
 /** Detect default output format based on TTY. */
 export function defaultFormat(): OutputFormat {
   return process.stdout.isTTY ? 'table' : 'json';
@@ -71,9 +79,9 @@ function formatTable(data: unknown): string {
 
   // Error case — red
   if (obj.success === false) {
-    const lines = [`\x1b[31mError:\x1b[0m ${obj.error || 'Unknown error'}`];
-    if (obj.hint) lines.push(`\x1b[33mHint:\x1b[0m ${obj.hint}`);
-    if (obj.suggestions) lines.push(`\x1b[33mSuggestions:\x1b[0m ${(obj.suggestions as string[]).join(', ')}`);
+    const lines = [`${c(RED, 'Error:')} ${obj.error || 'Unknown error'}`];
+    if (obj.hint) lines.push(`${c(YELLOW, 'Hint:')} ${obj.hint}`);
+    if (obj.suggestions) lines.push(`${c(YELLOW, 'Suggestions:')} ${(obj.suggestions as string[]).join(', ')}`);
     return lines.join('\n');
   }
 
@@ -136,7 +144,7 @@ function formatArrayAsTable(arr: Record<string, unknown>[], label: string): stri
     }
   }
 
-  const countLine = arr.length > 1 ? `\n\x1b[2m${arr.length} ${label}\x1b[0m` : '';
+  const countLine = arr.length > 1 ? `\n${c(DIM, `${arr.length} ${label}`)}` : '';
   return lines.join('\n') + countLine;
 }
 
@@ -151,12 +159,12 @@ function formatKeyValue(obj: Record<string, unknown>): string {
 
     if (typeof value === 'object' && !Array.isArray(value)) {
       // Nested object — inline JSON
-      lines.push(`\x1b[1m${key}:\x1b[0m`);
+      lines.push(`${c(BOLD, key + ':')}`)
       lines.push(indent(JSON.stringify(value, null, 2), '  '));
     } else if (Array.isArray(value)) {
-      lines.push(`\x1b[1m${key}:\x1b[0m ${value.length} items`);
+      lines.push(`${c(BOLD, key + ':')} ${value.length} items`);
     } else {
-      lines.push(`\x1b[1m${key}:\x1b[0m ${value}`);
+      lines.push(`${c(BOLD, key + ':')} ${value}`);
     }
   }
   return lines.join('\n');
@@ -171,3 +179,14 @@ function formatCell(value: unknown): string {
 function indent(text: string, prefix: string): string {
   return text.split('\n').map((line) => prefix + line).join('\n');
 }
+
+/** Wrap text in ANSI escape codes, respecting NO_COLOR. */
+function c(code: string, text: string): string {
+  if (!shouldColor()) return text;
+  return `${code}${text}\x1b[0m`;
+}
+
+const RED = '\x1b[31m';
+const YELLOW = '\x1b[33m';
+const BOLD = '\x1b[1m';
+const DIM = '\x1b[2m';

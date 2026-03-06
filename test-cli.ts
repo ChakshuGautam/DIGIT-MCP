@@ -11,7 +11,7 @@
  */
 import { Command } from 'commander';
 import { addSchemaOptions, optsToArgs, toFlag, toArgKey } from './src/cli/adapter.js';
-import { formatOutput } from './src/cli/formatter.js';
+import { formatOutput, shouldColor } from './src/cli/formatter.js';
 import { saveCredentials, loadCredentials, clearCredentials } from './src/cli/auth.js';
 import { ToolRegistry } from './src/tools/registry.js';
 import { registerAllTools } from './src/tools/index.js';
@@ -405,6 +405,78 @@ console.log('\n=== 18. Formatter: single value response ===\n');
   const input = JSON.stringify({ success: true, count: 42 });
   const plain = formatOutput(input, 'plain');
   assert(plain === '42', 'plain mode: single value extracted');
+}
+
+console.log('\n=== 19. Formatter: shouldColor respects NO_COLOR ===\n');
+{
+  // shouldColor should return false when NO_COLOR is set
+  const origNoColor = process.env.NO_COLOR;
+  const origTerm = process.env.TERM;
+
+  process.env.NO_COLOR = '1';
+  assert(shouldColor() === false, 'shouldColor: false when NO_COLOR set');
+  delete process.env.NO_COLOR;
+
+  process.env.TERM = 'dumb';
+  assert(shouldColor() === false, 'shouldColor: false when TERM=dumb');
+  if (origTerm !== undefined) process.env.TERM = origTerm;
+  else delete process.env.TERM;
+
+  if (origNoColor !== undefined) process.env.NO_COLOR = origNoColor;
+}
+
+console.log('\n=== 20. Formatter: table mode respects NO_COLOR ===\n');
+{
+  const origNoColor = process.env.NO_COLOR;
+  process.env.NO_COLOR = '1';
+
+  const errInput = JSON.stringify({ success: false, error: 'Auth failed', hint: 'Call configure first' });
+  const errOutput = formatOutput(errInput, 'table');
+  assert(!errOutput.includes('\x1b['), 'table mode: no ANSI codes when NO_COLOR set');
+  assert(errOutput.includes('Error:'), 'table mode: still shows Error label');
+  assert(errOutput.includes('Hint:'), 'table mode: still shows Hint label');
+
+  if (origNoColor !== undefined) process.env.NO_COLOR = origNoColor;
+  else delete process.env.NO_COLOR;
+}
+
+console.log('\n=== 21. CLI program: --no-color flag present ===\n');
+{
+  const registry = new ToolRegistry();
+  registerAllTools(registry);
+  registry.enableGroups(ALL_GROUPS);
+
+  const program = buildProgram(registry);
+  const optNames = program.options.map((o) => o.long);
+  assert(optNames.includes('--no-color'), 'program: --no-color flag exists');
+}
+
+console.log('\n=== 22. CLI program: -V version flag ===\n');
+{
+  const registry = new ToolRegistry();
+  registerAllTools(registry);
+  registry.enableGroups(ALL_GROUPS);
+
+  const program = buildProgram(registry);
+  assert(program.version() === '1.0.0', 'program: version is 1.0.0');
+  // Check that short flag -V is configured
+  const versionOpt = program.options.find((o) => o.long === '--version');
+  assert(versionOpt !== undefined, 'program: --version option exists');
+  assert(versionOpt?.short === '-V', 'program: -V short flag for version');
+}
+
+console.log('\n=== 23. CLI program: help includes examples and links ===\n');
+{
+  const registry = new ToolRegistry();
+  registerAllTools(registry);
+  registry.enableGroups(ALL_GROUPS);
+
+  const program = buildProgram(registry);
+  const desc = program.description();
+  assert(desc.includes('Examples:'), 'program help: includes Examples section');
+  assert(desc.includes('digit pgr search'), 'program help: includes search example');
+  assert(desc.includes('github.com/ChakshuGautam/DIGIT-MCP'), 'program help: includes GitHub link');
+  assert(desc.includes('Issues:'), 'program help: includes Issues link');
 }
 
 // ============================================================

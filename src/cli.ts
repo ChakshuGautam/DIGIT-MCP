@@ -19,7 +19,7 @@ import { registerAllTools } from './tools/index.js';
 import { ALL_GROUPS } from './types/index.js';
 import type { ToolMetadata } from './types/index.js';
 import { addSchemaOptions, optsToArgs } from './cli/adapter.js';
-import { formatOutput, defaultFormat, type OutputFormat } from './cli/formatter.js';
+import { formatOutput, defaultFormat, shouldColor, type OutputFormat } from './cli/formatter.js';
 import { applyCredentialsToEnv, saveCredentials, clearCredentials, getCredentialsPath } from './cli/auth.js';
 
 // MCP-only tools that don't make sense in CLI context
@@ -40,9 +40,21 @@ const CORE_GROUP = 'core';
 export function buildProgram(registry: ToolRegistry): Command {
   const program = new Command('digit');
   program
-    .version('1.0.0')
-    .description('DIGIT platform CLI — manage tenants, complaints, employees, and more')
-    .option('--output <format>', 'Output format: json, table, plain', undefined);
+    .version('1.0.0', '-V, --version')
+    .description(
+      'DIGIT platform CLI — manage tenants, complaints, employees, and more\n\n' +
+      'Examples:\n' +
+      '  $ digit login --environment chakshu-digit --username ADMIN\n' +
+      '  $ digit pgr search --tenant-id pg.citya --status RESOLVED\n' +
+      '  $ digit pgr create --tenant-id pg.citya --service-code StreetLightNotWorking \\\n' +
+      '      --description "Broken light" --citizen-name "Ravi" --citizen-mobile 9876543210 \\\n' +
+      '      --address \'{"locality":{"code":"LOC_CITYA_1"}}\'\n' +
+      '  $ digit health-check\n\n' +
+      'Docs:     https://github.com/ChakshuGautam/DIGIT-MCP#readme\n' +
+      'Issues:   https://github.com/ChakshuGautam/DIGIT-MCP/issues'
+    )
+    .option('--output <format>', 'Output format: json, table, plain', undefined)
+    .option('--no-color', 'Disable colored output');
 
   // Add login/logout convenience commands
   addAuthCommands(program);
@@ -112,9 +124,9 @@ function buildToolCommand(tool: ToolMetadata, program: Command): Command {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (format === 'json') {
-        console.log(JSON.stringify({ success: false, error: msg }, null, 2));
+        console.error(JSON.stringify({ success: false, error: msg }, null, 2));
       } else {
-        console.error(`\x1b[31mError:\x1b[0m ${msg}`);
+        console.error(colorError(msg));
       }
       process.exitCode = 1;
     }
@@ -130,10 +142,11 @@ function addAuthCommands(program: Command): void {
     .description('Save DIGIT credentials for subsequent commands')
     .requiredOption('--environment <env>', 'DIGIT environment (e.g. chakshu-digit)')
     .requiredOption('--username <user>', 'DIGIT username')
-    .requiredOption('--password <pass>', 'DIGIT password')
+    .requiredOption('--password <pass>', 'DIGIT password (prefer stdin: echo $PASS | digit login ...)')
     .option('--tenant-id [id]', 'Override tenant ID')
     .option('--state-tenant [id]', 'Override state tenant')
     .action((opts) => {
+      console.error('Warning: password passed via flag. Prefer: echo $PASS | digit login ... or set CRS_PASSWORD env var.');
       saveCredentials({
         environment: opts.environment,
         username: opts.username,
@@ -162,6 +175,11 @@ function saveConfigureCredentials(args: Record<string, unknown>): void {
   if (args.tenant_id) creds.tenant_id = String(args.tenant_id);
   if (args.state_tenant) creds.state_tenant = String(args.state_tenant);
   if (Object.keys(creds).length > 0) saveCredentials(creds);
+}
+
+/** Format an error message with optional color. */
+function colorError(msg: string): string {
+  return shouldColor() ? `\x1b[31mError:\x1b[0m ${msg}` : `Error: ${msg}`;
 }
 
 /** Truncate long descriptions for help output. */
