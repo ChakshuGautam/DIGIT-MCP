@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-DIGIT MCP Server — an MCP (Model Context Protocol) server exposing 32+ DIGIT eGov platform APIs through a progressive disclosure architecture. Written in TypeScript, supports dual transport: stdio (local Claude Code) and HTTP Streamable (containerized/K8s).
+DIGIT MCP Server + CLI — exposes 60 DIGIT eGov platform APIs through both an MCP server (progressive disclosure, AI agents) and a CLI (`digit` command). Written in TypeScript, the MCP server supports dual transport: stdio and HTTP Streamable. The CLI is auto-generated from the same `ToolRegistry` — zero per-tool CLI code.
 
 ## Commands
 
@@ -13,11 +13,13 @@ npm run build          # TypeScript compile (tsc) → dist/
 npm run dev            # Run directly with tsx (no build needed, stdio transport)
 npm start              # Run built server (stdio transport)
 npm run start:http     # Run built server (HTTP transport on :3000)
+npm run cli -- --help  # Run CLI directly with tsx (no build needed)
 
 npm test               # Quick validator test (test-validator.ts)
 npm run test:ci        # Integration test against live DIGIT API (test-integration.ts)
 npm run test:full      # Full integration + c8 coverage report (test-integration-full.ts)
 npm run test:e2e       # E2E new-tenant test (test-e2e-new-tenant.ts)
+npx tsx test-cli.ts    # CLI tests (96 tests — adapter, formatter, auth, structure)
 
 # Agent-based flow tests (require built server + ANTHROPIC_API_KEY)
 cd agent-tests && npx tsx run.ts                    # All flows
@@ -26,6 +28,15 @@ cd agent-tests && npx tsx run.ts --verbose          # Full conversation logging
 ```
 
 ## Architecture
+
+### Three Interfaces, One Registry
+
+The `ToolRegistry` is the shared core. Three interfaces consume it:
+- **MCP Server** (`src/index.ts`) — stdio + HTTP transport for AI agents
+- **CLI** (`src/cli.ts`) — Commander.js, auto-generated from `inputSchema`
+- **Tests** — import registry directly for unit tests
+
+Adding a new tool to the registry automatically adds it to both MCP and CLI.
 
 ### Dual Transport (`src/index.ts`)
 
@@ -68,12 +79,26 @@ Singleton `digitApi` handles authentication (OAuth2 password grant), multi-tenan
 - **City tenant** (leaf): `pg.citya`, `statea.f` — used for PGR, HRMS, boundaries
 - Auto-derived: city tenant `pg.citya` → state root `pg`
 
+### CLI (`src/cli.ts`)
+
+Auto-generates Commander.js commands from the tool registry at runtime. No per-tool CLI code.
+
+- `src/cli.ts` — entry point, builds Commander program from `registry.getAllTools()`
+- `src/cli/adapter.ts` — JSON Schema → Commander.js option mapper (type coercion, enums, variadic arrays, JSON objects)
+- `src/cli/formatter.ts` — three output modes: `json` (default piped), `table` (default TTY), `plain` (scripting)
+- `src/cli/auth.ts` — credential persistence to `~/.config/digit-cli/credentials.json`
+
+Core tools (`configure`, `health-check`, etc.) are top-level commands. Other tools are grouped: `digit pgr search`, `digit mdms search`.
+
+4 MCP-only tools are excluded from CLI: `discover_tools`, `enable_tools`, `init`, `session_checkpoint`.
+
 ## Adding a New Tool
 
 1. Create or edit a file in `src/tools/` with a `registerXyzTools(registry: ToolRegistry)` function
 2. Define `ToolMetadata` with `name`, `group` (use existing `ToolGroup` or add new one in `src/types/index.ts`), `inputSchema` (JSON Schema), and async `handler`
 3. Import and call the registration function in `src/tools/index.ts` → `registerAllTools()`
 4. If adding a new group, add it to the `ToolGroup` union type in `src/types/index.ts` and to the `enable_tools` description in `src/tools/discover-tools.ts`
+5. **CLI auto-generates** — no additional code needed. The new tool appears as a CLI command automatically.
 
 ## Adding a New DIGIT API Method
 
