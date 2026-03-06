@@ -6,9 +6,11 @@ import {
 import { ToolRegistry } from './tools/registry.js';
 import { registerAllTools } from './tools/index.js';
 import { ALL_GROUPS } from './types/index.js';
+import type { ErrorCategory } from './types/index.js';
 import { mcpLogger } from './logger.js';
 import { sessionStore } from './services/session-store.js';
 import { telemetry } from './services/telemetry.js';
+import { ApiClientError } from './services/digit-api.js';
 
 export interface CreateServerOptions {
   enableAllGroups?: boolean;
@@ -121,18 +123,29 @@ export function createServer(options?: CreateServerOptions): Server {
       sessionStore.recordToolResult(seq, name, durationMs, true, '', errorMsg);
       telemetry.toolError(name, errorMsg);
 
+      // Derive error category for agent-friendly error handling
+      let category: ErrorCategory = 'internal';
+      let code: number | undefined;
+      if (error instanceof ApiClientError) {
+        category = error.category;
+        code = error.statusCode;
+      } else if (error instanceof Error && error.name === 'ValidationError') {
+        category = 'validation';
+        code = 400;
+      }
+
+      const errorResponse: Record<string, unknown> = {
+        success: false,
+        error: errorMsg,
+        category,
+      };
+      if (code !== undefined) errorResponse.code = code;
+
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(
-              {
-                success: false,
-                error: errorMsg,
-              },
-              null,
-              2
-            ),
+            text: JSON.stringify(errorResponse, null, 2),
           },
         ],
         isError: true,
