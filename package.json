@@ -1,9 +1,23 @@
 {
-  "name": "digit-mcp",
+  "name": "@chakshu-gautam/digit-mcp",
   "version": "1.0.0",
-  "description": "MCP server for CRS/DIGIT validation with progressive disclosure",
+  "description": "DIGIT platform MCP server + CLI — 60 tools for tenant management, PGR, HRMS, and more",
   "type": "module",
   "main": "dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ChakshuGautam/DIGIT-MCP.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "files": [
+    "dist/",
+    "docs/",
+    "data/engrams/",
+    "skills/",
+    "README.md"
+  ],
   "bin": {
     "digit-mcp": "./dist/index.js",
     "digit": "./dist/cli.js"
@@ -18,8 +32,10 @@
     "test:ci": "tsx test-integration.ts",
     "test:full": "c8 --src src --include 'src/**/*.ts' --exclude 'src/index.ts' --exclude 'src/server.ts' --exclude 'src/data/**' --reporter text --reporter text-summary --reporter html tsx test-integration-full.ts",
     "test:e2e": "tsx test-e2e-new-tenant.ts",
+    "test:cli": "tsx test-cli.ts",
     "test:openapi": "tsx test-openapi-spec.ts",
-    "engram": "tsx engram-agent.ts"
+    "engram": "tsx engram-agent.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "latest",

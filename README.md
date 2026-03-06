@@ -81,6 +81,63 @@ Add to your MCP settings (`.cursor/mcp.json`, `.windsurf/mcp.json`, or VS Code M
 
 </details>
 
+## CLI
+
+The `digit` CLI provides the same 56 tools as the MCP server, auto-generated from the shared tool registry. No per-tool CLI code — adding an MCP tool automatically adds a CLI command.
+
+### Install
+
+```bash
+npm install -g @chakshu-gautam/digit-mcp --registry=https://npm.pkg.github.com
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/ChakshuGautam/DIGIT-MCP.git
+cd DIGIT-MCP && npm install && npm run build
+npm link   # makes `digit` available globally
+```
+
+### Usage
+
+```bash
+# Authenticate (saved to ~/.config/digit-cli/credentials.json)
+digit login --environment chakshu-digit --username ADMIN --password eGov@123
+
+# Search complaints
+digit pgr search --tenant-id pg.citya --status RESOLVED
+
+# File a complaint
+digit pgr create --tenant-id pg.citya --service-code StreetLightNotWorking \
+  --description "Broken light on MG Road" \
+  --address '{"locality":{"code":"LOC_CITYA_1"}}' \
+  --citizen-name "Ravi Kumar" --citizen-mobile 9876543210
+
+# MDMS search
+digit mdms search --tenant-id pg --schema-code common-masters.Department
+
+# Health check
+digit health-check
+
+# Output formats
+digit pgr search --tenant-id pg.citya --output json    # raw JSON (default when piped)
+digit pgr search --tenant-id pg.citya --output table   # formatted table (default on TTY)
+digit pgr search --tenant-id pg.citya --output plain   # minimal for scripting
+```
+
+### Command Structure
+
+```
+digit <group> <command> [flags]     # grouped tools
+digit <command> [flags]             # core tools (top-level)
+digit --help                        # list all groups
+digit pgr --help                    # list pgr commands
+digit pgr search --help             # show all flags
+```
+
+Core tools (`configure`, `health-check`, `get-environment-info`, `mdms-get-tenants`) are top-level. All other tools are grouped: `digit pgr search`, `digit mdms search`, `digit boundary validate`, etc.
+
 ## Quick Start
 
 ```bash
@@ -88,6 +145,7 @@ npm install
 npm run build
 npm start              # stdio transport (default)
 npm run start:http     # HTTP transport on :3000
+npm run cli -- --help  # CLI (dev mode, no build needed)
 ```
 
 ## Docker
@@ -202,7 +260,12 @@ npm run test:openapi     # Validate OpenAPI spec against live APIs
 
 ```
 src/
-├── index.ts              # Entry point (dual transport: stdio / HTTP)
+├── index.ts              # MCP entry point (dual transport: stdio / HTTP)
+├── cli.ts                # CLI entry point (Commander.js, auto-generated commands)
+├── cli/
+│   ├── adapter.ts        # JSON Schema → Commander.js option mapper
+│   ├── formatter.ts      # json / table / plain output formatting
+│   └── auth.ts           # Credential persistence (~/.config/digit-cli/)
 ├── server.ts             # MCP server with listChanged notifications
 ├── types/                # Shared types, ToolGroup, MDMS schema constants
 ├── config/
