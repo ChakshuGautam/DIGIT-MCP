@@ -223,6 +223,7 @@ enable_tools(["tracing"]) → trace_debug → trace_get
 | [API Nuances](docs/guides/api-nuances.md) | Known DIGIT API quirks and gotchas |
 | [Building a PGR UI](docs/ui.md) | Complete guide to building complaint management frontends |
 | [Architecture](docs/architecture.md) | Server internals, transport, progressive disclosure |
+| [CLI Architecture](docs/cli-architecture.md) | How the CLI is auto-generated from the tool registry |
 | [API Reference](docs/api/README.md) | All 60 tools with parameters and examples |
 | [OpenAPI Spec](docs/openapi.yaml) | Machine-readable API specification |
 
