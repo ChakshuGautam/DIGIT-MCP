@@ -16,6 +16,9 @@ export interface ToolMetadata {
   handler: (args: Record<string, unknown>) => Promise<string>;
 }
 
+// Error categories for agent-friendly error handling
+export type ErrorCategory = 'validation' | 'auth' | 'api' | 'internal';
+
 // DIGIT API types
 export interface RequestInfo {
   apiId: string;

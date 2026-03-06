@@ -1,16 +1,24 @@
 import { ENDPOINTS, OAUTH_CONFIG } from '../config/endpoints.js';
 import { getEnvironment } from '../config/environments.js';
-import type { RequestInfo, UserInfo, MdmsRecord, ApiError, Environment } from '../types/index.js';
+import type { RequestInfo, UserInfo, MdmsRecord, ApiError, Environment, ErrorCategory } from '../types/index.js';
 
-class ApiClientError extends Error {
+function deriveErrorCategory(statusCode: number): ErrorCategory {
+  if (statusCode === 401 || statusCode === 403) return 'auth';
+  if (statusCode >= 400 && statusCode < 500) return 'validation';
+  return 'api';
+}
+
+export class ApiClientError extends Error {
   public errors: ApiError[];
   public statusCode: number;
+  public category: ErrorCategory;
 
   constructor(errors: ApiError[], statusCode: number) {
     super(errors.map((e) => e.message || e.code || 'Unknown error').join(', '));
     this.name = 'ApiClientError';
     this.errors = errors;
     this.statusCode = statusCode;
+    this.category = deriveErrorCategory(statusCode);
   }
 }
 
