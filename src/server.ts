@@ -11,6 +11,7 @@ import { mcpLogger } from './logger.js';
 import { sessionStore } from './services/session-store.js';
 import { telemetry } from './services/telemetry.js';
 import { ApiClientError } from './services/digit-api.js';
+import { getErrorHint } from './utils/error-hints.js';
 
 export interface CreateServerOptions {
   enableAllGroups?: boolean;
@@ -140,6 +141,8 @@ export function createServer(options?: CreateServerOptions): Server {
         category,
       };
       if (code !== undefined) errorResponse.code = code;
+      const hint = getErrorHint(errorMsg);
+      if (hint) errorResponse.hint = hint;
 
       return {
         content: [
