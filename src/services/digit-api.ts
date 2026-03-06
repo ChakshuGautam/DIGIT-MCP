@@ -1,16 +1,24 @@
 import { ENDPOINTS, OAUTH_CONFIG } from '../config/endpoints.js';
 import { getEnvironment } from '../config/environments.js';
-import type { RequestInfo, UserInfo, MdmsRecord, ApiError, Environment } from '../types/index.js';
+import type { RequestInfo, UserInfo, MdmsRecord, ApiError, Environment, ErrorCategory } from '../types/index.js';
 
-class ApiClientError extends Error {
+function deriveErrorCategory(statusCode: number): ErrorCategory {
+  if (statusCode === 401 || statusCode === 403) return 'auth';
+  if (statusCode >= 400 && statusCode < 500) return 'validation';
+  return 'api';
+}
+
+export class ApiClientError extends Error {
   public errors: ApiError[];
   public statusCode: number;
+  public category: ErrorCategory;
 
   constructor(errors: ApiError[], statusCode: number) {
     super(errors.map((e) => e.message || e.code || 'Unknown error').join(', '));
     this.name = 'ApiClientError';
     this.errors = errors;
     this.statusCode = statusCode;
+    this.category = deriveErrorCategory(statusCode);
   }
 }
 
@@ -113,6 +121,9 @@ class DigitApiClient {
     this.stateTenantOverride = derivedState !== this.environment.stateTenantId ? derivedState : null;
   }
 
+  private static readonly RETRY_STATUS_CODES = new Set([429, 503]);
+  private static readonly MAX_RETRIES = 3;
+
   private async request<T = unknown>(
     endpoint: string,
     body: Record<string, unknown>
@@ -127,25 +138,53 @@ class DigitApiClient {
       headers['Authorization'] = `Bearer ${this.authToken}`;
     }
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
+    const jsonBody = JSON.stringify(body);
+    let lastResponse: Response | undefined;
 
-    const data = await response.json() as Record<string, unknown>;
+    for (let attempt = 0; attempt < DigitApiClient.MAX_RETRIES; attempt++) {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: jsonBody,
+      });
 
-    if (!response.ok || (data.Errors as ApiError[] | undefined)?.length) {
-      const errors: ApiError[] = (data.Errors as ApiError[]) || [
-        {
-          code: `HTTP_${response.status}`,
-          message: (data.message as string) || `Request failed: ${response.status}`,
-        },
-      ];
-      throw new ApiClientError(errors, response.status);
+      if (!DigitApiClient.RETRY_STATUS_CODES.has(response.status)) {
+        // Not a retryable status — process normally
+        const data = await response.json() as Record<string, unknown>;
+
+        if (!response.ok || (data.Errors as ApiError[] | undefined)?.length) {
+          const errors: ApiError[] = (data.Errors as ApiError[]) || [
+            {
+              code: `HTTP_${response.status}`,
+              message: (data.message as string) || `Request failed: ${response.status}`,
+            },
+          ];
+          throw new ApiClientError(errors, response.status);
+        }
+
+        return data as T;
+      }
+
+      // Retryable — wait with exponential backoff, respect Retry-After header
+      lastResponse = response;
+      if (attempt < DigitApiClient.MAX_RETRIES - 1) {
+        const retryAfter = response.headers.get('Retry-After');
+        const delayMs = retryAfter
+          ? parseInt(retryAfter, 10) * 1000
+          : (1 << attempt) * 1000; // 1s, 2s, 4s
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
     }
 
-    return data as T;
+    // All retries exhausted — throw with the last response
+    const data = await lastResponse!.json().catch(() => ({})) as Record<string, unknown>;
+    const errors: ApiError[] = (data.Errors as ApiError[]) || [
+      {
+        code: `HTTP_${lastResponse!.status}`,
+        message: (data.message as string) || `Request failed after ${DigitApiClient.MAX_RETRIES} retries: ${lastResponse!.status}`,
+      },
+    ];
+    throw new ApiClientError(errors, lastResponse!.status);
   }
 
   // User search

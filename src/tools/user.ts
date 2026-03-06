@@ -1,6 +1,11 @@
 import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
+import { autoPaginate, PAGINATION_SCHEMA_PROPERTIES } from '../utils/pagination.js';
+import type { PaginationOptions } from '../utils/pagination.js';
+import { validateTenantId, validateMobileNumber, rejectControlChars, validateStringLength } from '../utils/validation.js';
+import { sanitizeUserContent } from '../utils/sanitize.js';
+import { applyFieldMask } from '../utils/field-mask.js';
 
 export function registerUserTools(registry: ToolRegistry): void {
   registry.register({
@@ -44,6 +49,12 @@ export function registerUserTools(registry: ToolRegistry): void {
         },
         limit: { type: 'number', description: 'Max results (default: 100)' },
         offset: { type: 'number', description: 'Offset for pagination (default: 0)' },
+        ...PAGINATION_SCHEMA_PROPERTIES,
+        fields: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional: only return these fields per result. Available: id, uuid, userName, name, mobileNumber, emailId, type, active, tenantId, roles',
+        },
       },
       required: ['tenant_id'],
     },
@@ -51,38 +62,63 @@ export function registerUserTools(registry: ToolRegistry): void {
       await ensureAuthenticated();
 
       try {
-        const users = await digitApi.userSearch(args.tenant_id as string, {
+        const tenantId = args.tenant_id as string;
+        const searchOpts = {
           userName: args.user_name as string | undefined,
           mobileNumber: args.mobile_number as string | undefined,
           uuid: args.uuid as string[] | undefined,
           roleCodes: args.role_codes as string[] | undefined,
           userType: args.user_type as string | undefined,
-          limit: (args.limit as number) || 100,
-          offset: (args.offset as number) || 0,
-        });
+        };
+        const pageOpts = args as PaginationOptions;
+
+        let users: Record<string, unknown>[];
+        let paginationMeta: Record<string, unknown> | undefined;
+
+        if (pageOpts.page_all) {
+          const result = await autoPaginate(
+            (limit, offset) => digitApi.userSearch(tenantId, { ...searchOpts, limit, offset }),
+            pageOpts,
+            100,
+          );
+          users = result.items;
+          paginationMeta = { totalFetched: result.totalFetched, pages: result.pages, truncated: result.truncated };
+        } else {
+          users = await digitApi.userSearch(tenantId, {
+            ...searchOpts,
+            limit: (args.limit as number) || 100,
+            offset: (args.offset as number) || 0,
+          });
+        }
+
+        const fields = args.fields as string[] | undefined;
+        const mapped = users.map((u) => ({
+          id: u.id,
+          uuid: u.uuid,
+          userName: u.userName,
+          name: sanitizeUserContent(u.name as string),
+          mobileNumber: u.mobileNumber,
+          emailId: u.emailId,
+          type: u.type,
+          active: u.active,
+          tenantId: u.tenantId,
+          roles: ((u.roles || []) as Array<{ code: string; name?: string; tenantId?: string }>).map((r) => ({
+            code: r.code,
+            name: r.name,
+            tenantId: r.tenantId,
+          })),
+        }));
+        const { items: masked, truncated } = applyFieldMask(mapped, fields);
 
         return JSON.stringify(
           {
             success: true,
             tenantId: args.tenant_id,
             count: users.length,
-            users: users.slice(0, 50).map((u) => ({
-              id: u.id,
-              uuid: u.uuid,
-              userName: u.userName,
-              name: u.name,
-              mobileNumber: u.mobileNumber,
-              emailId: u.emailId,
-              type: u.type,
-              active: u.active,
-              tenantId: u.tenantId,
-              roles: ((u.roles || []) as Array<{ code: string; name?: string; tenantId?: string }>).map((r) => ({
-                code: r.code,
-                name: r.name,
-                tenantId: r.tenantId,
-              })),
-            })),
-            truncated: users.length > 50,
+            ...(paginationMeta ? { pagination: paginationMeta } : {}),
+            users: masked,
+            truncated,
+            ...(fields ? { fieldsApplied: fields } : {}),
           },
           null,
           2
@@ -160,6 +196,11 @@ export function registerUserTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'name', 'mobile_number'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateMobileNumber(args.mobile_number, 'mobile_number');
+      rejectControlChars(args.name as string, 'name');
+      validateStringLength(args.name as string, 200, 'name');
+
       await ensureAuthenticated();
 
       const tenantId = args.tenant_id as string;

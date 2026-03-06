@@ -34,6 +34,7 @@
     "test:e2e": "tsx test-e2e-new-tenant.ts",
     "test:cli": "tsx test-cli.ts",
     "test:openapi": "tsx test-openapi-spec.ts",
+    "test:safety": "tsx test-agent-safety.ts",
     "engram": "tsx engram-agent.ts",
     "prepublishOnly": "npm run build"
   },

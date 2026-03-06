@@ -1,6 +1,11 @@
 import type { ToolMetadata } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
+import { autoPaginate, PAGINATION_SCHEMA_PROPERTIES } from '../utils/pagination.js';
+import type { PaginationOptions } from '../utils/pagination.js';
+import { validateTenantId, validateMobileNumber, rejectControlChars, validateStringLength, validateResourceId } from '../utils/validation.js';
+import { sanitizeUserContent } from '../utils/sanitize.js';
+import { applyFieldMask } from '../utils/field-mask.js';
 
 export function registerPgrWorkflowTools(registry: ToolRegistry): void {
   // ──────────────────────────────────────────
@@ -32,61 +37,90 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         },
         limit: { type: 'number', description: 'Max results (default: 50)' },
         offset: { type: 'number', description: 'Offset for pagination (default: 0)' },
+        ...PAGINATION_SCHEMA_PROPERTIES,
+        fields: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional: only return these fields per result. Available: serviceRequestId, serviceCode, description, status, priority, rating, citizen, address, workflow, createdTime, lastModifiedTime',
+        },
       },
       required: ['tenant_id'],
     },
     handler: async (args) => {
       await ensureAuthenticated();
 
-      const complaints = await digitApi.pgrSearch(args.tenant_id as string, {
+      const tenantId = args.tenant_id as string;
+      const searchOpts = {
         serviceRequestId: args.service_request_id as string | undefined,
         status: args.status as string | undefined,
-        limit: (args.limit as number) || 50,
-        offset: (args.offset as number) || 0,
+      };
+      const pageOpts = args as PaginationOptions;
+
+      let complaints: Record<string, unknown>[];
+      let paginationMeta: Record<string, unknown> | undefined;
+
+      if (pageOpts.page_all) {
+        const result = await autoPaginate(
+          (limit, offset) => digitApi.pgrSearch(tenantId, { ...searchOpts, limit, offset }),
+          pageOpts,
+          50,
+        );
+        complaints = result.items;
+        paginationMeta = { totalFetched: result.totalFetched, pages: result.pages, truncated: result.truncated };
+      } else {
+        complaints = await digitApi.pgrSearch(tenantId, {
+          ...searchOpts,
+          limit: (args.limit as number) || 50,
+          offset: (args.offset as number) || 0,
+        });
+      }
+
+      const mapped = complaints.map((sw) => {
+        const svc = sw.service as Record<string, unknown> | undefined;
+        const wf = sw.workflow as Record<string, unknown> | undefined;
+        const citizen = svc?.citizen as Record<string, unknown> | undefined;
+        const address = svc?.address as Record<string, unknown> | undefined;
+        const audit = svc?.auditDetails as Record<string, unknown> | undefined;
+        return {
+          serviceRequestId: svc?.serviceRequestId,
+          serviceCode: svc?.serviceCode,
+          description: sanitizeUserContent(svc?.description as string),
+          status: svc?.applicationStatus,
+          priority: svc?.priority,
+          rating: svc?.rating,
+          citizen: citizen ? {
+            name: sanitizeUserContent(citizen.name as string),
+            mobileNumber: citizen.mobileNumber,
+            uuid: citizen.uuid,
+          } : null,
+          address: address ? {
+            locality: address.locality,
+            city: address.city,
+            district: address.district,
+          } : null,
+          workflow: wf ? {
+            action: wf.action,
+            state: wf.state,
+            assignes: wf.assignes,
+            comment: wf.comments,
+          } : null,
+          createdTime: audit?.createdTime,
+          lastModifiedTime: audit?.lastModifiedTime,
+        };
       });
 
-      return JSON.stringify(
-        {
-          success: true,
-          tenantId: args.tenant_id,
-          count: complaints.length,
-          complaints: complaints.map((sw) => {
-            const svc = sw.service as Record<string, unknown> | undefined;
-            const wf = sw.workflow as Record<string, unknown> | undefined;
-            const citizen = svc?.citizen as Record<string, unknown> | undefined;
-            const address = svc?.address as Record<string, unknown> | undefined;
-            const audit = svc?.auditDetails as Record<string, unknown> | undefined;
-            return {
-              serviceRequestId: svc?.serviceRequestId,
-              serviceCode: svc?.serviceCode,
-              description: svc?.description,
-              status: svc?.applicationStatus,
-              priority: svc?.priority,
-              rating: svc?.rating,
-              citizen: citizen ? {
-                name: citizen.name,
-                mobileNumber: citizen.mobileNumber,
-                uuid: citizen.uuid,
-              } : null,
-              address: address ? {
-                locality: address.locality,
-                city: address.city,
-                district: address.district,
-              } : null,
-              workflow: wf ? {
-                action: wf.action,
-                state: wf.state,
-                assignes: wf.assignes,
-                comment: wf.comments,
-              } : null,
-              createdTime: audit?.createdTime,
-              lastModifiedTime: audit?.lastModifiedTime,
-            };
-          }),
-        },
-        null,
-        2
-      );
+      const fields = args.fields as string[] | undefined;
+      const { items: masked, truncated } = applyFieldMask(mapped, fields);
+
+      return JSON.stringify({
+        success: true,
+        tenantId,
+        count: complaints.length,
+        ...(paginationMeta ? { pagination: paginationMeta } : {}),
+        complaints: masked,
+        truncated,
+        ...(fields ? { fieldsApplied: fields } : {}),
+      }, null, 2);
     },
   } satisfies ToolMetadata);
 
@@ -138,15 +172,67 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
           type: 'string',
           description: 'Mobile number of the citizen (required, 10 digits)',
         },
+        dry_run: {
+          type: 'boolean',
+          description: 'If true, validate inputs and check prerequisites without executing. Returns a preview of what would happen.',
+        },
       },
       required: ['tenant_id', 'service_code', 'description', 'address', 'citizen_name', 'citizen_mobile'],
     },
     handler: async (args) => {
-      await ensureAuthenticated();
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateMobileNumber(args.citizen_mobile, 'citizen_mobile');
+      rejectControlChars(args.description as string, 'description');
+      validateStringLength(args.description as string, 2000, 'description');
+      rejectControlChars(args.citizen_name as string, 'citizen_name');
+      validateStringLength(args.citizen_name as string, 200, 'citizen_name');
+      validateResourceId(args.service_code as string, 'service_code');
 
       const tenantId = args.tenant_id as string;
+      const serviceCode = args.service_code as string;
+      const description = args.description as string;
       const citizenName = args.citizen_name as string;
       const citizenMobile = args.citizen_mobile as string;
+      const address = args.address as Record<string, unknown>;
+      const dryRun = args.dry_run === true;
+
+      if (dryRun) {
+        const issues: string[] = [];
+
+        // Check auth
+        if (!digitApi.isAuthenticated()) {
+          issues.push('Not authenticated. Call "configure" first.');
+        }
+
+        // Check complaint type exists
+        if (digitApi.isAuthenticated()) {
+          try {
+            const stateRoot = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
+            const types = await digitApi.mdmsV2Search(stateRoot, 'RAINMAKER-PGR.ServiceDefs');
+            const codes = types.map((t) => (t.data as Record<string, unknown>)?.serviceCode);
+            if (!codes.includes(serviceCode)) {
+              issues.push(`Service code "${serviceCode}" not found. Available: ${codes.slice(0, 10).join(', ')}`);
+            }
+          } catch { /* skip if can't check */ }
+        }
+
+        return JSON.stringify({
+          success: true,
+          dry_run: true,
+          valid: issues.length === 0,
+          issues,
+          preview: {
+            tenantId,
+            serviceCode,
+            description: description.slice(0, 100),
+            citizen: { name: citizenName, mobile: citizenMobile },
+            address,
+          },
+        }, null, 2);
+      }
+
+      await ensureAuthenticated();
+
       const env = digitApi.getEnvironmentInfo();
       const rootTenant = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
 
@@ -331,6 +417,10 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
       required: ['tenant_id', 'service_request_id', 'action'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.service_request_id, 'service_request_id');
+      if (args.comment) rejectControlChars(args.comment, 'comment');
+
       await ensureAuthenticated();
 
       const action = args.action as string;
@@ -563,26 +653,41 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
         },
         limit: { type: 'number', description: 'Max results (default: 50)' },
         offset: { type: 'number', description: 'Offset (default: 0)' },
+        ...PAGINATION_SCHEMA_PROPERTIES,
       },
       required: ['tenant_id'],
     },
     handler: async (args) => {
       await ensureAuthenticated();
 
-      const processes = await digitApi.workflowProcessSearch(
-        args.tenant_id as string,
-        args.business_ids as string[] | undefined,
-        {
+      const tenantId = args.tenant_id as string;
+      const businessIds = args.business_ids as string[] | undefined;
+      const pageOpts = args as PaginationOptions;
+
+      let processes: Record<string, unknown>[];
+      let paginationMeta: Record<string, unknown> | undefined;
+
+      if (pageOpts.page_all) {
+        const result = await autoPaginate(
+          (limit, offset) => digitApi.workflowProcessSearch(tenantId, businessIds, { limit, offset }),
+          pageOpts,
+          50,
+        );
+        processes = result.items;
+        paginationMeta = { totalFetched: result.totalFetched, pages: result.pages, truncated: result.truncated };
+      } else {
+        processes = await digitApi.workflowProcessSearch(tenantId, businessIds, {
           limit: (args.limit as number) || 50,
           offset: (args.offset as number) || 0,
-        }
-      );
+        });
+      }
 
       return JSON.stringify(
         {
           success: true,
           tenantId: args.tenant_id,
           count: processes.length,
+          ...(paginationMeta ? { pagination: paginationMeta } : {}),
           processInstances: processes.map((p) => ({
             id: p.id,
             businessId: p.businessId,
@@ -668,6 +773,9 @@ export function registerPgrWorkflowTools(registry: ToolRegistry): void {
       required: ['tenant_id'],
     },
     handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      if (args.copy_from_tenant) validateTenantId(args.copy_from_tenant, 'copy_from_tenant');
+
       await ensureAuthenticated();
 
       const inputTenantId = args.tenant_id as string;

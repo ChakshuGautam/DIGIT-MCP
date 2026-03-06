@@ -3,6 +3,28 @@ import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
 import { buildOpenApiSpec, getServiceSummary, getServiceTags } from '../data/openapi-spec.js';
 
+// Map tools to their related tools for contextual suggestions
+const RELATED_TOOLS: Record<string, string[]> = {
+  pgr_create: ['validate_complaint_types', 'validate_boundary', 'pgr_search', 'pgr_update'],
+  pgr_update: ['pgr_search', 'validate_employees', 'workflow_business_services'],
+  pgr_search: ['pgr_create', 'pgr_update', 'workflow_process_search'],
+  employee_create: ['validate_departments', 'validate_designations', 'validate_boundary', 'access_roles_search'],
+  employee_update: ['validate_employees', 'validate_departments', 'validate_designations'],
+  mdms_create: ['mdms_search', 'mdms_schema_search'],
+  mdms_search: ['mdms_create', 'mdms_schema_search'],
+  tenant_bootstrap: ['city_setup', 'mdms_get_tenants', 'validate_tenant'],
+  city_setup: ['tenant_bootstrap', 'boundary_create', 'employee_create'],
+  boundary_create: ['validate_boundary', 'boundary_hierarchy_search'],
+  configure: ['get_environment_info', 'validate_tenant', 'enable_tools'],
+  user_search: ['user_create', 'user_role_add'],
+  user_create: ['user_search', 'employee_create'],
+  user_role_add: ['user_search', 'configure'],
+  localization_search: ['localization_upsert'],
+  localization_upsert: ['localization_search'],
+  workflow_business_services: ['workflow_create', 'workflow_process_search'],
+  workflow_process_search: ['pgr_search', 'workflow_business_services'],
+};
+
 export function registerApiCatalogTools(registry: ToolRegistry): void {
   registry.register({
     name: 'api_catalog',
@@ -19,6 +41,12 @@ export function registerApiCatalogTools(registry: ToolRegistry): void {
     inputSchema: {
       type: 'object' as const,
       properties: {
+        tool: {
+          type: 'string',
+          description:
+            'Look up a specific tool by name (e.g. "pgr_create"). Returns its input schema, ' +
+            'required/optional fields, and related tools. More token-efficient than fetching the full catalog.',
+        },
         service: {
           type: 'string',
           description:
@@ -36,6 +64,61 @@ export function registerApiCatalogTools(registry: ToolRegistry): void {
       },
     },
     handler: async (args) => {
+      // ── Tool lookup mode ──
+      const toolName = args.tool as string | undefined;
+      if (toolName) {
+        const tool = registry.getTool(toolName);
+        if (!tool) {
+          // Fuzzy match: suggest tools whose names contain the query
+          const allTools = registry.getAllTools();
+          const suggestions = allTools
+            .filter((t) => t.name.includes(toolName.toLowerCase()))
+            .slice(0, 5)
+            .map((t) => t.name);
+
+          return JSON.stringify(
+            {
+              success: false,
+              error: `Tool "${toolName}" not found.`,
+              suggestions: suggestions.length > 0 ? suggestions : undefined,
+              hint: 'Use discover_tools to list all available tools.',
+            },
+            null,
+            2,
+          );
+        }
+
+        const schema = tool.inputSchema as Record<string, unknown>;
+        const properties = (schema.properties || {}) as Record<string, Record<string, unknown>>;
+        const required = new Set((schema.required || []) as string[]);
+
+        // Build parameter list with required/optional annotations
+        const params = Object.entries(properties).map(([name, prop]) => ({
+          name,
+          type: prop.type,
+          required: required.has(name),
+          description: prop.description,
+          ...(prop.enum ? { enum: prop.enum } : {}),
+          ...(prop.default !== undefined ? { default: prop.default } : {}),
+        }));
+
+        return JSON.stringify(
+          {
+            success: true,
+            tool: tool.name,
+            group: tool.group,
+            category: tool.category,
+            risk: tool.risk,
+            description: tool.description,
+            parameters: params,
+            relatedTools: RELATED_TOOLS[tool.name] || [],
+          },
+          null,
+          2,
+        );
+      }
+
+      // ── Existing behavior: service filter + format ──
       const serviceFilter = args.service as string | undefined;
       const format = (args.format as string) || 'summary';
       const envInfo = digitApi.getEnvironmentInfo();
@@ -77,7 +160,8 @@ export function registerApiCatalogTools(registry: ToolRegistry): void {
             services: filtered,
             hint:
               'Use format "openapi" to get the full OpenAPI 3.0 spec with request/response schemas. ' +
-              'Filter by service name to narrow results (e.g. service: "PGR").',
+              'Filter by service name to narrow results (e.g. service: "PGR"). ' +
+              'Use tool parameter for single-tool schema lookup (e.g. tool: "pgr_create").',
           },
           null,
           2,
