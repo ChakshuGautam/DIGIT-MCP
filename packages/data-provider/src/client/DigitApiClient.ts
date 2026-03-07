@@ -385,7 +385,7 @@ export class DigitApiClient {
   async pgrUpdate(service: Record<string, unknown>, action: string, options?: {
     comment?: string; assignees?: string[]; rating?: number;
   }): Promise<Record<string, unknown>> {
-    const workflow: Record<string, unknown> = { action, assignes: options?.assignees || [], comments: options?.comment };
+    const workflow: Record<string, unknown> = { action, assignees: options?.assignees || [], comments: options?.comment };
     if (options?.rating !== undefined) workflow.rating = options.rating;
 
     const data = await this.request<{ ServiceWrappers?: Record<string, unknown>[] }>(this.endpoint('PGR_UPDATE'), {

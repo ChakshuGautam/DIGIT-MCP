@@ -1,7 +1,7 @@
 import { ENDPOINTS } from '../client/endpoints.js';
 import { MDMS_SCHEMAS } from '../client/types.js';
 
-export type ResourceType = 'mdms' | 'hrms' | 'boundary' | 'pgr' | 'localization';
+export type ResourceType = 'mdms' | 'hrms' | 'boundary' | 'pgr' | 'localization' | 'user' | 'workflow-bs' | 'workflow-process' | 'access-role' | 'mdms-schema' | 'boundary-hierarchy';
 
 export interface ResourceConfig {
   type: ResourceType;
@@ -55,6 +55,30 @@ export const REGISTRY: Record<string, ResourceConfig> = {
     descriptionField: 'message',
     endpoint: { search: ENDPOINTS.LOCALIZATION_SEARCH, create: ENDPOINTS.LOCALIZATION_UPSERT },
     dedicated: true,
+  },
+  users: {
+    type: 'user', label: 'Users', idField: 'uuid', nameField: 'userName',
+    descriptionField: 'name', dedicated: true,
+  },
+  'workflow-business-services': {
+    type: 'workflow-bs', label: 'Workflow Business Services', idField: 'businessService',
+    nameField: 'businessService', descriptionField: 'business', dedicated: true,
+  },
+  'workflow-processes': {
+    type: 'workflow-process', label: 'Workflow Processes', idField: 'id',
+    nameField: 'businessId', descriptionField: 'action', dedicated: true,
+  },
+  'access-roles': {
+    type: 'access-role', label: 'Access Roles', idField: 'code',
+    nameField: 'name', descriptionField: 'description', dedicated: true,
+  },
+  'mdms-schemas': {
+    type: 'mdms-schema', label: 'MDMS Schemas', idField: 'code',
+    nameField: 'code', descriptionField: 'description', dedicated: true,
+  },
+  'boundary-hierarchies': {
+    type: 'boundary-hierarchy', label: 'Boundary Hierarchies', idField: 'hierarchyType',
+    nameField: 'hierarchyType', dedicated: true,
   },
 
   // Generic MDMS Resources

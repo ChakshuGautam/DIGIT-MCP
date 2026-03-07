@@ -108,6 +108,48 @@ async function localizationGetList(client: DigitApiClient, config: ResourceConfi
   return messages.map((m) => normalizeRecord(m, config));
 }
 
+async function userGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string, filter?: Record<string, unknown>): Promise<RaRecord[]> {
+  const opts: { userName?: string; mobileNumber?: string; uuid?: string[]; roleCodes?: string[]; userType?: string; limit: number } = { limit: 100 };
+  if (filter?.userName) opts.userName = String(filter.userName);
+  if (filter?.mobileNumber) opts.mobileNumber = String(filter.mobileNumber);
+  if (filter?.userType) opts.userType = String(filter.userType);
+  if (filter?.roleCodes) opts.roleCodes = filter.roleCodes as string[];
+  if (filter?.uuid) opts.uuid = Array.isArray(filter.uuid) ? filter.uuid as string[] : [String(filter.uuid)];
+  // DIGIT user search requires at least one filter; default to CITIZEN role
+  if (!opts.userName && !opts.mobileNumber && !opts.userType && !opts.roleCodes && !opts.uuid) {
+    opts.roleCodes = ['CITIZEN'];
+  }
+  const users = await client.userSearch(tenantId, opts);
+  return users.map((u) => normalizeRecord(u, config));
+}
+
+async function workflowBsGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string, filter?: Record<string, unknown>): Promise<RaRecord[]> {
+  const codes = filter?.businessServices ? filter.businessServices as string[] : ['PGR'];
+  const services = await client.workflowBusinessServiceSearch(tenantId, codes);
+  return services.map((s) => normalizeRecord(s, config));
+}
+
+async function workflowProcessGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string, filter?: Record<string, unknown>): Promise<RaRecord[]> {
+  const businessIds = filter?.businessId ? [String(filter.businessId)] : undefined;
+  const processes = await client.workflowProcessSearch(tenantId, businessIds, { limit: 100 });
+  return processes.map((p) => normalizeRecord(p, config));
+}
+
+async function accessRoleGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string): Promise<RaRecord[]> {
+  const roles = await client.accessRolesSearch(tenantId);
+  return roles.map((r) => normalizeRecord(r, config));
+}
+
+async function mdmsSchemaGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string): Promise<RaRecord[]> {
+  const schemas = await client.mdmsSchemaSearch(tenantId);
+  return schemas.map((s) => normalizeRecord(s, config));
+}
+
+async function boundaryHierarchyGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string): Promise<RaRecord[]> {
+  const hierarchies = await client.boundaryHierarchySearch(tenantId);
+  return hierarchies.map((h) => normalizeRecord(h, config));
+}
+
 // --- Factory ---
 
 export function createDigitDataProvider(client: DigitApiClient, tenantId: string): DataProvider {
@@ -125,6 +167,12 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
       case 'boundary': return boundaryGetList(client, config, tenantId);
       case 'pgr': return pgrGetList(client, config, tenantId, filter);
       case 'localization': return localizationGetList(client, config, tenantId, filter);
+      case 'user': return userGetList(client, config, tenantId, filter);
+      case 'workflow-bs': return workflowBsGetList(client, config, tenantId, filter);
+      case 'workflow-process': return workflowProcessGetList(client, config, tenantId, filter);
+      case 'access-role': return accessRoleGetList(client, config, tenantId);
+      case 'mdms-schema': return mdmsSchemaGetList(client, config, tenantId);
+      case 'boundary-hierarchy': return boundaryHierarchyGetList(client, config, tenantId);
       default: throw new Error(`Unsupported resource type: ${config.type}`);
     }
   }
@@ -166,6 +214,16 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
         if (!wrappers.length) throw new Error(`Complaint not found: ${params.id}`);
         const service = (wrappers[0].service || wrappers[0]) as Record<string, unknown>;
         return { data: normalizeRecord(service, config) };
+      }
+      if (config.type === 'user') {
+        const users = await client.userSearch(tenantId, { uuid: [String(params.id)] });
+        if (!users.length) throw new Error(`User not found: ${params.id}`);
+        return { data: normalizeRecord(users[0], config) };
+      }
+      if (config.type === 'workflow-bs') {
+        const services = await client.workflowBusinessServiceSearch(tenantId, [String(params.id)]);
+        if (!services.length) throw new Error(`Workflow business service not found: ${params.id}`);
+        return { data: normalizeRecord(services[0], config) };
       }
       if (config.type === 'boundary') {
         // Search entity table directly to get full data (additionalDetails, geometry, auditDetails)
@@ -209,7 +267,9 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
     },
 
     async getManyReference(resource, params): Promise<GetManyReferenceResult> {
-      const all = await fetchAll(resource);
+      // Pass reference target as filter (needed for resources like workflow-processes that require server-side filtering)
+      const refFilter = { ...params.filter, [params.target]: params.id };
+      const all = await fetchAll(resource, refFilter);
       const filtered = all.filter((r) => {
         const val = getNestedValue(r as unknown as Record<string, unknown>, params.target);
         return String(val) === String(params.id);

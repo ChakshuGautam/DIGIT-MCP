@@ -99,6 +99,21 @@ describe('DataProvider Integration Tests', () => {
   describe('MDMS: departments', () => {
     let firstId: string;
     let secondId: string;
+    const seedCodes = [`DEPT_HEALTH_${TEST_PREFIX}`, `DEPT_WORKS_${TEST_PREFIX}`, `DEPT_ADMIN_${TEST_PREFIX}`, `DEPT_FINANCE_${TEST_PREFIX}`];
+
+    before(async () => {
+      // Seed departments so sorting/filter/pagination tests have enough data
+      for (const code of seedCodes) {
+        const name = code.replace(`_${TEST_PREFIX}`, '').replace('DEPT_', '');
+        try { await dpRoot.create('departments', { data: { code, name, active: true } }); } catch { /* may exist */ }
+      }
+    });
+
+    after(async () => {
+      for (const code of seedCodes) {
+        try { await dpRoot.delete('departments', { id: code, previousData: { id: code } }); } catch { /* best-effort */ }
+      }
+    });
 
     it('getList returns departments with pagination', async () => {
       const result = await dpRoot.getList('departments', {
@@ -128,9 +143,9 @@ describe('DataProvider Integration Tests', () => {
 
     it('getList supports q filter (full-text search)', async () => {
       const result = await dpRoot.getList('departments', {
-        pagination: { page: 1, perPage: 100 }, sort: { field: 'code', order: 'ASC' }, filter: { q: 'Health' },
+        pagination: { page: 1, perPage: 100 }, sort: { field: 'code', order: 'ASC' }, filter: { q: TEST_PREFIX },
       });
-      assert.ok(result.data.length > 0, 'Should find departments matching "Health"');
+      assert.ok(result.data.length > 0, `Should find departments matching "${TEST_PREFIX}"`);
     });
 
     it('getList page 2 differs from page 1', async () => {
@@ -958,13 +973,376 @@ describe('DataProvider Integration Tests', () => {
   });
 
   // =========================================================================
+  // Users (read-only via DataProvider, using dpRoot)
+  // =========================================================================
+
+  describe('Users', () => {
+    let firstUuid: string;
+
+    it('getList returns users', async () => {
+      const result = await dpRoot.getList('users', {
+        pagination: { page: 1, perPage: 10 }, sort: { field: 'uuid', order: 'ASC' }, filter: {},
+      });
+      assert.ok(result.data.length > 0, 'Should return users');
+      assert.ok(result.total > 0, 'Should have a total count');
+      assert.ok((result.data[0] as any).uuid, 'User should have uuid');
+      assert.ok((result.data[0] as any).userName, 'User should have userName');
+      firstUuid = String(result.data[0].id);
+    });
+
+    it('getOne fetches a user by uuid', async () => {
+      assert.ok(firstUuid, 'Need a uuid from getList');
+      const result = await dpRoot.getOne('users', { id: firstUuid });
+      assert.equal(String(result.data.id), firstUuid);
+      assert.ok((result.data as any).userName, 'Should have userName');
+    });
+
+    it('getMany fetches multiple users', async () => {
+      const list = await dpRoot.getList('users', {
+        pagination: { page: 1, perPage: 3 }, sort: { field: 'uuid', order: 'ASC' }, filter: {},
+      });
+      const ids = list.data.slice(0, 2).map((r) => String(r.id));
+      const result = await dpRoot.getMany('users', { ids });
+      assert.equal(result.data.length, ids.length, `Should return ${ids.length} users`);
+    });
+  });
+
+  // =========================================================================
+  // Workflow Business Services (read-only, using dpRoot)
+  // =========================================================================
+
+  describe('Workflow Business Services', () => {
+    it('getList returns business services', async () => {
+      const result = await dpRoot.getList('workflow-business-services', {
+        pagination: { page: 1, perPage: 50 }, sort: { field: 'businessService', order: 'ASC' }, filter: {},
+      });
+      assert.ok(result.data.length > 0, 'Should return workflow business services');
+      assert.ok((result.data[0] as any).businessService, 'Should have businessService field');
+    });
+
+    it('getOne fetches PGR business service', async () => {
+      const list = await dpRoot.getList('workflow-business-services', {
+        pagination: { page: 1, perPage: 50 }, sort: { field: 'businessService', order: 'ASC' }, filter: {},
+      });
+      const pgr = list.data.find((r) => (r as any).businessService === 'PGR');
+      assert.ok(pgr, 'PGR business service should exist');
+      const result = await dpRoot.getOne('workflow-business-services', { id: 'PGR' });
+      assert.equal(String(result.data.id), 'PGR');
+    });
+  });
+
+  // =========================================================================
+  // Workflow Processes (read-only, using dpCity)
+  // =========================================================================
+
+  describe('Workflow Processes', () => {
+    let complaintBizId: string;
+
+    it('getList returns process instances (filtered by businessId)', async () => {
+      // Workflow process search requires businessIds; fetch a known complaint first
+      const complaints = await dpCity.getList('complaints', {
+        pagination: { page: 1, perPage: 1 }, sort: { field: 'serviceRequestId', order: 'DESC' }, filter: {},
+      });
+      assert.ok(complaints.data.length > 0, 'Need at least one complaint for process search');
+      complaintBizId = String(complaints.data[0].id);
+      const result = await dpCity.getList('workflow-processes', {
+        pagination: { page: 1, perPage: 10 }, sort: { field: 'id', order: 'DESC' },
+        filter: { businessId: complaintBizId },
+      });
+      assert.ok(result.data.length > 0, 'Should return workflow process instances for complaint');
+      assert.ok((result.data[0] as any).businessId, 'Process should have businessId');
+      assert.ok((result.data[0] as any).action, 'Process should have action');
+    });
+
+    it('getManyReference finds processes by businessId', async () => {
+      assert.ok(complaintBizId, 'Need a businessId from previous test');
+      const result = await dpCity.getManyReference('workflow-processes', {
+        target: 'businessId', id: complaintBizId,
+        pagination: { page: 1, perPage: 50 }, sort: { field: 'id', order: 'ASC' }, filter: {},
+      });
+      assert.ok(result.data.length > 0, `Should find process instances for complaint ${complaintBizId}`);
+    });
+  });
+
+  // =========================================================================
+  // Access Roles (read-only, using dpRoot)
+  // =========================================================================
+
+  describe('Access Roles', () => {
+    it('getList returns roles', async () => {
+      const result = await dpRoot.getList('access-roles', {
+        pagination: { page: 1, perPage: 50 }, sort: { field: 'code', order: 'ASC' }, filter: {},
+      });
+      assert.ok(result.data.length > 0, 'Should return access control roles');
+      assert.ok((result.data[0] as any).code, 'Role should have code');
+      assert.ok((result.data[0] as any).name, 'Role should have name');
+    });
+
+    it('getOne fetches CITIZEN role', async () => {
+      const result = await dpRoot.getOne('access-roles', { id: 'CITIZEN' });
+      assert.equal(String(result.data.id), 'CITIZEN');
+      assert.ok((result.data as any).name, 'CITIZEN role should have a name');
+    });
+  });
+
+  // =========================================================================
+  // MDMS Schemas (read-only, using dpRoot)
+  // =========================================================================
+
+  describe('MDMS Schemas', () => {
+    it('getList returns schemas', async () => {
+      const result = await dpRoot.getList('mdms-schemas', {
+        pagination: { page: 1, perPage: 50 }, sort: { field: 'code', order: 'ASC' }, filter: {},
+      });
+      assert.ok(result.data.length > 0, 'Should return MDMS schema definitions');
+      assert.ok((result.data[0] as any).code, 'Schema should have code');
+    });
+
+    it('getOne fetches Department schema', async () => {
+      const list = await dpRoot.getList('mdms-schemas', {
+        pagination: { page: 1, perPage: 200 }, sort: { field: 'code', order: 'ASC' }, filter: {},
+      });
+      const dept = list.data.find((r) => String(r.id).includes('Department'));
+      assert.ok(dept, 'Department schema should exist');
+      const result = await dpRoot.getOne('mdms-schemas', { id: String(dept.id) });
+      assert.equal(String(result.data.id), String(dept.id));
+    });
+  });
+
+  // =========================================================================
+  // Boundary Hierarchies (read-only, using dpCity)
+  // =========================================================================
+
+  describe('Boundary Hierarchies', () => {
+    it('getList returns hierarchy definitions', async () => {
+      const result = await dpCity.getList('boundary-hierarchies', {
+        pagination: { page: 1, perPage: 50 }, sort: { field: 'hierarchyType', order: 'ASC' }, filter: {},
+      });
+      assert.ok(result.data.length > 0, 'Should return boundary hierarchy definitions');
+      assert.ok((result.data[0] as any).hierarchyType, 'Hierarchy should have hierarchyType');
+    });
+
+    it('getOne fetches ADMIN hierarchy', async () => {
+      const result = await dpCity.getOne('boundary-hierarchies', { id: 'ADMIN' });
+      assert.equal(String(result.data.id), 'ADMIN');
+    });
+  });
+
+  // =========================================================================
+  // Scenario: PGR Full Lifecycle (create → assign → resolve → rate)
+  // =========================================================================
+
+  describe('Scenario: PGR Full Lifecycle', () => {
+    it('create → assign → resolve → rate', async () => {
+      // 1. Create complaint
+      const ctResult = await dpRoot.getList('complaint-types', {
+        pagination: { page: 1, perPage: 1 }, sort: { field: 'serviceCode', order: 'ASC' }, filter: {},
+      });
+      const serviceCode = ctResult.data.length > 0 ? String((ctResult.data[0] as any).serviceCode) : 'StreetLightNotWorking';
+
+      // Find a valid locality code
+      let localityCode = 'LOC_CITYA_1';
+      try {
+        const boundaries = await client.boundaryRelationshipSearch(CITY_TENANT, 'ADMIN');
+        const findLocality = (nodes: unknown[]): string | undefined => {
+          if (!Array.isArray(nodes)) return undefined;
+          for (const n of nodes as Record<string, unknown>[]) {
+            if ((n.boundaryType as string) === 'Locality') return n.code as string;
+            const child = findLocality(n.children as unknown[]);
+            if (child) return child;
+          }
+          return undefined;
+        };
+        for (const tree of boundaries) {
+          const found = findLocality((tree.boundary || []) as unknown[]);
+          if (found) { localityCode = found; break; }
+        }
+      } catch { /* use default */ }
+
+      const wrapper = await client.pgrCreate(CITY_TENANT, serviceCode,
+        `Full lifecycle test ${TEST_PREFIX}`,
+        { locality: { code: localityCode } },
+        { name: 'Lifecycle Citizen', mobileNumber: '4444444444', type: 'CITIZEN',
+          roles: [{ code: 'CITIZEN', name: 'Citizen', tenantId: DIGIT_TENANT }], tenantId: DIGIT_TENANT },
+      );
+      const service = (wrapper as any).service || wrapper;
+      const srId = service.serviceRequestId;
+      assert.ok(srId, 'Complaint should have serviceRequestId');
+      assert.equal(service.applicationStatus, 'PENDINGFORASSIGNMENT', 'New complaint should be PENDINGFORASSIGNMENT');
+
+      // 2. Find an employee UUID to assign to
+      const employees = await client.employeeSearch(CITY_TENANT, { limit: 10 });
+      const activeEmp = employees.find((e: any) => e.isActive !== false);
+      assert.ok(activeEmp, 'Need at least one active employee for assignment');
+      const empUuid = (activeEmp as any).uuid || (activeEmp as any).user?.uuid;
+      assert.ok(empUuid, 'Employee should have a UUID');
+
+      // 3. ASSIGN (GRO assigns to LME)
+      const afterAssign = await client.pgrUpdate(service, 'ASSIGN', {
+        comment: 'Assigning to employee', assignees: [empUuid],
+      });
+      const assignedService = (afterAssign as any).service || afterAssign;
+      assert.equal(assignedService.applicationStatus, 'PENDINGATLME', 'After ASSIGN should be PENDINGATLME');
+
+      // 4. RESOLVE (LME resolves)
+      const afterResolve = await client.pgrUpdate(assignedService, 'RESOLVE', {
+        comment: 'Issue has been fixed',
+      });
+      const resolvedService = (afterResolve as any).service || afterResolve;
+      assert.equal(resolvedService.applicationStatus, 'RESOLVED', 'After RESOLVE should be RESOLVED');
+
+      // 5. RATE (Citizen rates and closes)
+      const afterRate = await client.pgrUpdate(resolvedService, 'RATE', {
+        comment: 'Satisfied with resolution', rating: 5,
+      });
+      const ratedService = (afterRate as any).service || afterRate;
+      assert.equal(ratedService.applicationStatus, 'CLOSEDAFTERRESOLUTION', 'After RATE should be CLOSEDAFTERRESOLUTION');
+
+      // 6. Verify via workflow process search (audit trail)
+      const processes = await client.workflowProcessSearch(CITY_TENANT, [srId]);
+      assert.ok(processes.length >= 4, `Should have at least 4 workflow transitions (APPLY + ASSIGN + RESOLVE + RATE), got ${processes.length}`);
+      const actions = processes.map((p: any) => p.action);
+      assert.ok(actions.includes('APPLY'), 'Audit trail should include APPLY');
+      assert.ok(actions.includes('ASSIGN'), 'Audit trail should include ASSIGN');
+      assert.ok(actions.includes('RESOLVE'), 'Audit trail should include RESOLVE');
+      assert.ok(actions.includes('RATE'), 'Audit trail should include RATE');
+    });
+  });
+
+  // =========================================================================
+  // Scenario: User CRUD (create → search → update)
+  // =========================================================================
+
+  describe('Scenario: User CRUD', () => {
+    it('create → search → update', async () => {
+      const mobile = `88${Date.now().toString().slice(-8)}`;
+      const userName = `inttest_${Date.now()}`;
+
+      // 1. Create user (active: true required for immediate searchability)
+      const created = await client.userCreate({
+        userName, name: `Test User ${TEST_PREFIX}`, mobileNumber: mobile,
+        gender: 'MALE', type: 'CITIZEN', password: 'eGov@123', active: true,
+        roles: [{ code: 'CITIZEN', name: 'Citizen', tenantId: DIGIT_TENANT }],
+      }, DIGIT_TENANT);
+      assert.ok(created.uuid, 'Created user should have uuid');
+      assert.equal(created.userName, userName, 'Username should match');
+
+      // 2. Search by mobile number
+      const found = await client.userSearch(DIGIT_TENANT, { mobileNumber: mobile });
+      assert.ok(found.length > 0, 'Should find user by mobile number');
+      assert.equal((found[0] as any).uuid, created.uuid, 'Found user should match created user');
+
+      // 3. Update user name
+      const toUpdate = { ...found[0], name: `Updated User ${TEST_PREFIX}` };
+      const updated = await client.userUpdate(toUpdate as Record<string, unknown>);
+      assert.equal((updated as any).name, `Updated User ${TEST_PREFIX}`, 'Name should be updated');
+
+      // 4. Verify update persisted
+      const verify = await client.userSearch(DIGIT_TENANT, { uuid: [created.uuid as string] });
+      assert.ok(verify.length > 0, 'Should find user after update');
+      assert.equal((verify[0] as any).name, `Updated User ${TEST_PREFIX}`, 'Updated name should persist');
+    });
+  });
+
+  // =========================================================================
+  // Scenario: Encryption Round-Trip
+  // =========================================================================
+
+  describe('Scenario: Encryption Round-Trip', () => {
+    it('encrypt → decrypt → verify match', async () => {
+      const plainValues = ['9876543210', 'sensitive-data-test', 'hello@example.com'];
+
+      // 1. Encrypt
+      const encrypted = await client.encryptData(DIGIT_TENANT, plainValues);
+      assert.equal(encrypted.length, plainValues.length, 'Should return same number of encrypted values');
+      for (let i = 0; i < encrypted.length; i++) {
+        assert.notEqual(encrypted[i], plainValues[i], `Encrypted value ${i} should differ from plain text`);
+        assert.ok(typeof encrypted[i] === 'string' && encrypted[i].length > 0, `Encrypted value ${i} should be a non-empty string`);
+      }
+
+      // 2. Decrypt
+      const decrypted = await client.decryptData(DIGIT_TENANT, encrypted);
+      assert.equal(decrypted.length, plainValues.length, 'Should return same number of decrypted values');
+
+      // 3. Verify round-trip
+      for (let i = 0; i < plainValues.length; i++) {
+        assert.equal(decrypted[i], plainValues[i], `Decrypted value ${i} should match original plain text`);
+      }
+    });
+  });
+
+  // =========================================================================
+  // Scenario: ID Generation
+  // =========================================================================
+
+  describe('Scenario: ID Generation', () => {
+    it('generates formatted IDs', async () => {
+      const results = await client.idgenGenerate(DIGIT_TENANT, [
+        { idName: 'pgr.servicerequestid' },
+      ]);
+      assert.ok(results.length > 0, 'Should return generated IDs');
+      assert.ok(results[0].id, 'Generated result should have id field');
+      assert.ok(typeof results[0].id === 'string' && results[0].id.length > 0, 'ID should be a non-empty string');
+    });
+
+    it('generates multiple IDs in one call', async () => {
+      const results = await client.idgenGenerate(DIGIT_TENANT, [
+        { idName: 'pgr.servicerequestid' },
+        { idName: 'pgr.servicerequestid' },
+      ]);
+      assert.equal(results.length, 2, 'Should return 2 generated IDs');
+      assert.notEqual(results[0].id, results[1].id, 'Each generated ID should be unique');
+    });
+  });
+
+  // =========================================================================
+  // Scenario: Tenant Bootstrap Reads
+  // =========================================================================
+
+  describe('Scenario: Tenant Bootstrap Reads', () => {
+    it('mdmsSchemaSearch returns schema definitions', async () => {
+      const schemas = await client.mdmsSchemaSearch(DIGIT_TENANT);
+      assert.ok(schemas.length > 0, 'Should return schema definitions');
+      const deptSchema = schemas.find((s: any) => String(s.code).includes('Department'));
+      assert.ok(deptSchema, 'Should have a Department schema');
+      assert.ok((deptSchema as any).definition, 'Schema should have a definition');
+    });
+
+    it('mdmsSchemaSearch filters by codes', async () => {
+      const schemas = await client.mdmsSchemaSearch(DIGIT_TENANT, ['common-masters.Department']);
+      assert.ok(schemas.length > 0, 'Should find Department schema by code');
+      assert.ok(String((schemas[0] as any).code).includes('Department'), 'Returned schema should be Department');
+    });
+
+    it('boundaryHierarchySearch returns hierarchy definitions', async () => {
+      const hierarchies = await client.boundaryHierarchySearch(CITY_TENANT, 'ADMIN');
+      assert.ok(hierarchies.length > 0, 'Should return ADMIN hierarchy');
+      const admin = hierarchies[0] as any;
+      assert.equal(admin.hierarchyType, 'ADMIN', 'Should be ADMIN type');
+      assert.ok(admin.boundaryHierarchy || admin.boundaryHierarchyJsonNode, 'Should have hierarchy definition');
+    });
+
+    it('workflowBusinessServiceCreate is covered by before() hook', async () => {
+      const services = await client.workflowBusinessServiceSearch(DIGIT_TENANT, ['PGR']);
+      assert.ok(services.length > 0, 'PGR workflow should exist (created by test setup)');
+      const pgr = services[0] as any;
+      assert.ok(pgr.states?.length > 0, 'PGR workflow should have states');
+    });
+  });
+
+  // =========================================================================
   // Coverage Matrix Validation
   // =========================================================================
 
   describe('Coverage: all resources in registry are testable', () => {
     it('all dedicated resources have at least a getList test above', () => {
       const dedicated = getDedicatedResources();
-      const expected = ['tenants', 'departments', 'designations', 'complaint-types', 'employees', 'boundaries', 'complaints', 'localization'];
+      const expected = [
+        'tenants', 'departments', 'designations', 'complaint-types',
+        'employees', 'boundaries', 'complaints', 'localization',
+        'users', 'workflow-business-services', 'workflow-processes',
+        'access-roles', 'mdms-schemas', 'boundary-hierarchies',
+      ];
       for (const name of expected) {
         assert.ok(dedicated[name], `${name} should be in dedicated resources`);
       }
