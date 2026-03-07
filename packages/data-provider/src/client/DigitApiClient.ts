@@ -350,6 +350,48 @@ export class DigitApiClient {
     return data.BoundaryRelationship || {};
   }
 
+  async boundaryRelationshipUpdate(tenantId: string, relationship: Record<string, unknown>): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ TenantBoundary?: Record<string, unknown>[] }>(this.endpoint('BOUNDARY_RELATIONSHIP_UPDATE'), {
+      RequestInfo: this.buildRequestInfo(),
+      BoundaryRelationship: { tenantId, ...relationship },
+    });
+    return data.TenantBoundary || [];
+  }
+
+  // --- Boundary Management ---
+
+  async boundaryMgmtProcess(tenantId: string, resourceDetails: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const data = await this.request<Record<string, unknown>>(this.endpoint('BNDRY_MGMT_PROCESS'), {
+      RequestInfo: this.buildRequestInfo(),
+      ResourceDetails: resourceDetails,
+    });
+    return data;
+  }
+
+  async boundaryMgmtProcessSearch(tenantId: string): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ ResourceDetails?: Record<string, unknown>[] }>(this.endpoint('BNDRY_MGMT_PROCESS_SEARCH'), {
+      RequestInfo: this.buildRequestInfo(),
+      SearchCriteria: { tenantId },
+    });
+    return data.ResourceDetails || [];
+  }
+
+  async boundaryMgmtGenerate(tenantId: string, resourceDetails: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const data = await this.request<Record<string, unknown>>(this.endpoint('BNDRY_MGMT_GENERATE'), {
+      RequestInfo: this.buildRequestInfo(),
+      ResourceDetails: resourceDetails,
+    });
+    return data;
+  }
+
+  async boundaryMgmtGenerateSearch(tenantId: string): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ ResourceDetails?: Record<string, unknown>[] }>(this.endpoint('BNDRY_MGMT_GENERATE_SEARCH'), {
+      RequestInfo: this.buildRequestInfo(),
+      SearchCriteria: { tenantId },
+    });
+    return data.ResourceDetails || [];
+  }
+
   // --- PGR ---
 
   async pgrSearch(tenantId: string, options?: {
@@ -470,6 +512,15 @@ export class DigitApiClient {
     return data.roles || [];
   }
 
+  async accessActionsSearch(tenantId: string, roleCodes: string[]): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ actions?: Record<string, unknown>[] }>(this.endpoint('ACCESS_ACTIONS_SEARCH'), {
+      RequestInfo: this.buildRequestInfo(),
+      roleCodes,
+      tenantId,
+    });
+    return data.actions || [];
+  }
+
   // --- ID Generation ---
 
   async idgenGenerate(tenantId: string, idRequests: { idName: string; tenantId?: string; format?: string }[]): Promise<{ id: string }[]> {
@@ -499,6 +550,29 @@ export class DigitApiClient {
     return (data.fileStoreIds as Record<string, unknown>[]) || [];
   }
 
+  async filestoreUpload(tenantId: string, module: string, fileName: string, fileContent: Buffer | Uint8Array, contentType?: string): Promise<string> {
+    const url = `${this.baseUrl}${this.endpoint('FILESTORE_UPLOAD')}`;
+    const formData = new FormData();
+    // Cast to BlobPart — Buffer/Uint8Array are valid at runtime but strict TS typing conflicts with ArrayBufferLike
+    const blob = new Blob([fileContent as unknown as BlobPart], { type: contentType || 'application/octet-stream' });
+    formData.append('file', blob, fileName);
+    formData.append('tenantId', tenantId);
+    formData.append('module', module);
+
+    const headers: Record<string, string> = {};
+    if (this.authToken) headers['Authorization'] = `Bearer ${this.authToken}`;
+
+    const response = await fetch(url, { method: 'POST', headers, body: formData });
+    const data = await response.json() as Record<string, unknown>;
+    if (!response.ok) {
+      const errors = data.Errors as { code?: string; message?: string }[] | undefined;
+      const errorMsg = errors?.map((e) => e.message || e.code).join(', ');
+      throw new Error(errorMsg || (data.message as string) || `File upload failed: ${response.status}`);
+    }
+    const files = data.files as { fileStoreId?: string }[] | undefined;
+    return files?.[0]?.fileStoreId || '';
+  }
+
   // --- Encryption ---
 
   async encryptData(tenantId: string, values: string[]): Promise<string[]> {
@@ -521,5 +595,41 @@ export class DigitApiClient {
     if (!response.ok) throw new Error(`Decryption failed: HTTP ${response.status}`);
     const data = await response.json();
     return Array.isArray(data) ? data : [];
+  }
+
+  // --- Location (legacy boundary service) ---
+
+  async locationBoundarySearch(tenantId: string, hierarchyType?: string, boundaryType?: string): Promise<Record<string, unknown>[]> {
+    const params = new URLSearchParams({ tenantId });
+    if (hierarchyType) params.append('hierarchyType', hierarchyType);
+    if (boundaryType) params.append('boundaryType', boundaryType);
+
+    const data = await this.request<{ TenantBoundary?: Record<string, unknown>[] }>(
+      `${this.endpoint('LOCATION_BOUNDARY_SEARCH')}?${params.toString()}`,
+      { RequestInfo: this.buildRequestInfo() },
+    );
+    return data.TenantBoundary || [];
+  }
+
+  // --- Inbox ---
+
+  async inboxSearch(tenantId: string, options?: {
+    module?: string; businessService?: string; limit?: number; offset?: number;
+  }): Promise<Record<string, unknown>[]> {
+    const data = await this.request<{ items?: Record<string, unknown>[]; inbox?: Record<string, unknown>[] }>(this.endpoint('INBOX_V2_SEARCH'), {
+      RequestInfo: this.buildRequestInfo(),
+      inbox: {
+        tenantId,
+        processSearchCriteria: {
+          tenantId,
+          moduleName: options?.module,
+          businessService: options?.businessService ? [options.businessService] : undefined,
+        },
+        moduleSearchCriteria: { tenantId },
+        limit: options?.limit || 50,
+        offset: options?.offset || 0,
+      },
+    });
+    return data.items || data.inbox || [];
   }
 }
