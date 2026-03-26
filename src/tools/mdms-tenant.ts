@@ -270,7 +270,13 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       const loginCandidates: string[] = [];
       if (explicitRoot) loginCandidates.push(explicitRoot);
       if (explicitTenantId && explicitTenantId !== explicitRoot) loginCandidates.push(explicitTenantId);
-      if (defaultLoginTenant && !loginCandidates.includes(defaultLoginTenant)) loginCandidates.push(defaultLoginTenant);
+      if (defaultLoginTenant && defaultLoginTenant !== 'default' && !loginCandidates.includes(defaultLoginTenant)) {
+        loginCandidates.push(defaultLoginTenant);
+      }
+      // For ad-hoc base_url with no explicit tenant, try common DIGIT root tenants
+      if (baseUrl && loginCandidates.length === 0) {
+        loginCandidates.push('pg', 'default');
+      }
       if (loginCandidates.length === 0) loginCandidates.push(defaultLoginTenant);
 
       let loginError: string | null = null;
@@ -305,9 +311,14 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         );
       }
 
-      // Set the operational state tenant
+      // Set the operational state tenant.
+      // For ad-hoc environments, derive it from the successful login tenant.
       if (desiredStateTenant) {
         digitApi.setStateTenant(desiredStateTenant);
+      } else if (baseUrl) {
+        // Derive state tenant from the tenant we successfully logged in with
+        const derivedRoot = usedLoginTenant.includes('.') ? usedLoginTenant.split('.')[0] : usedLoginTenant;
+        digitApi.setStateTenant(derivedRoot);
       }
 
       // ── Cross-tenant role provisioning ──
