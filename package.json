@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "description": "DIGIT platform MCP server + CLI — 60 tools for tenant management, PGR, HRMS, and more",
   "type": "module",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "main": "dist/index.js",
   "repository": {
     "type": "git",
@@ -43,6 +45,7 @@
     "@anthropic-ai/claude-agent-sdk": "latest",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "commander": "^14.0.3",
+    "exceljs": "^4.4.0",
     "pg": "^8.19.0"
   },
   "devDependencies": {
