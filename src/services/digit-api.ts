@@ -50,6 +50,26 @@ class DigitApiClient {
     this.stateTenantOverride = tenantId;
   }
 
+  /**
+   * Set an ad-hoc environment from a raw base URL (no named env lookup needed).
+   * Clears existing auth state so the caller must re-authenticate.
+   */
+  setAdHocEnvironment(baseUrl: string, endpointOverrides?: Record<string, string>): void {
+    // Strip trailing slash
+    const url = baseUrl.replace(/\/+$/, '');
+    const hostname = new URL(url).hostname;
+    this.environment = {
+      name: `${hostname} (ad-hoc)`,
+      url,
+      stateTenantId: 'default', // will be resolved from login response
+      description: `Ad-hoc connection to ${url}`,
+      endpointOverrides,
+    };
+    this.stateTenantOverride = null;
+    this.authToken = null;
+    this.userInfo = null;
+  }
+
   isAuthenticated(): boolean {
     return this.authToken !== null;
   }
