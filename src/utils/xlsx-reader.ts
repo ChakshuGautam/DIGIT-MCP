@@ -264,7 +264,12 @@ export function readDepartmentsDesignations(workbook: ExcelJS.Workbook): {
   deptNameToCode: Map<string, string>;
   desigNameToCode: Map<string, string>;
 } {
-  const sheet = findSheet(workbook, 'Department And Designation Master', 'Department and Designation Master');
+  const sheet = findSheet(
+    workbook,
+    'Department And Designation Master',
+    'Department and Designation Master',
+    'Department And Designation Mast', // ExcelJS truncates to 31 chars
+  );
   if (!sheet) throw new Error("Sheet 'Department And Designation Master' not found in workbook");
 
   const rows = sheetToRows(sheet);
