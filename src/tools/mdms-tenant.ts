@@ -10,6 +10,7 @@ import { validateTenantId, validateResourceId } from '../utils/validation.js';
 import { applyFieldMask } from '../utils/field-mask.js';
 import { probeServices } from '../utils/probe.js';
 import type { ProbeReport } from '../utils/probe.js';
+import { loadFromXlsx } from '../utils/xlsx-loader.js';
 
 /**
  * Search for MDMS records across all state tenants.
@@ -1787,6 +1788,99 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         }
 
         return JSON.stringify({ success: false, error: msg, hint }, null, 2);
+      }
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // city_setup_from_xlsx — xlsx-based tenant setup
+  // ──────────────────────────────────────────
+  registry.register({
+    name: 'city_setup_from_xlsx',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'write',
+    description:
+      'Set up a city tenant from xlsx files in CCRS dataloader format. ' +
+      'Processes up to 4 phases in order: Tenant info, Boundaries, Common Masters (departments, ' +
+      'designations, complaint types), and Employees. Each file is optional — provide only the ' +
+      'phases you need. Files can be local paths or DIGIT filestore IDs (UUID format).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Target city tenant ID (e.g. "pg.newcity"). Must contain a dot.',
+        },
+        tenant_file: {
+          type: 'string',
+          description:
+            'Local path or fileStoreId for Tenant & Branding xlsx. ' +
+            'Expected sheets: "Tenant Info" (required), "Tenant Branding Details" (optional).',
+        },
+        boundary_file: {
+          type: 'string',
+          description:
+            'Local path or fileStoreId for Boundary xlsx. ' +
+            'Uploaded to filestore and processed via boundary management service.',
+        },
+        masters_file: {
+          type: 'string',
+          description:
+            'Local path or fileStoreId for Common & Complaint Masters xlsx. ' +
+            'Expected sheets: "Department And Designation Master", "Complaint Type Master".',
+        },
+        employee_file: {
+          type: 'string',
+          description:
+            'Local path or fileStoreId for Employee Master xlsx. ' +
+            'Expected sheet: "Employee Master".',
+        },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const tenantFile = args.tenant_file as string | undefined;
+      const boundaryFile = args.boundary_file as string | undefined;
+      const mastersFile = args.masters_file as string | undefined;
+      const employeeFile = args.employee_file as string | undefined;
+
+      // Validate tenant_id format
+      if (!tenantId.includes('.')) {
+        return JSON.stringify({
+          success: false,
+          error: `tenant_id "${tenantId}" must contain a dot (e.g. "pg.newcity"). ` +
+            'Use tenant_bootstrap for state-level root tenants.',
+        }, null, 2);
+      }
+
+      // At least one file must be provided
+      if (!tenantFile && !boundaryFile && !mastersFile && !employeeFile) {
+        return JSON.stringify({
+          success: false,
+          error: 'At least one file parameter must be provided (tenant_file, boundary_file, masters_file, or employee_file).',
+        }, null, 2);
+      }
+
+      try {
+        const result = await loadFromXlsx({
+          tenant_id: tenantId,
+          tenant_file: tenantFile,
+          boundary_file: boundaryFile,
+          masters_file: mastersFile,
+          employee_file: employeeFile,
+        });
+        return JSON.stringify(result, null, 2);
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+          hint: 'If files are local paths, ensure they exist and are readable. ' +
+            'If fileStoreIds, ensure the files were uploaded to DIGIT filestore first.',
+        }, null, 2);
       }
     },
   } satisfies ToolMetadata);
