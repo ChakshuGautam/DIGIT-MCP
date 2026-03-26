@@ -343,7 +343,29 @@ async function main() {
     return ['configure'];
   });
 
-  await test('1.6 get_environment_info', async () => {
+  await test('1.6 configure: login via base_url (ad-hoc environment)', async () => {
+    const username = process.env.CRS_USERNAME || 'ADMIN';
+    const password = process.env.CRS_PASSWORD || 'eGov@123';
+    const baseUrl = process.env.CRS_API_URL || 'https://api.egov.theflywheel.in';
+
+    const r = await call('configure', { base_url: baseUrl, username, password });
+    assert(r.success === true, `configure with base_url should succeed: ${r.error || ''}`);
+    assert(r.environment, 'response should include environment info');
+    assert((r.environment as Record<string, unknown>).source === 'base_url' || (r.environment as Record<string, unknown>).name?.toString().includes('ad-hoc'),
+      'environment should indicate ad-hoc connection');
+
+    // Should have service probing results
+    assert(r.services, 'response should include services probe report');
+    const services = r.services as Record<string, Record<string, unknown>>;
+    assert(services.mdms, 'should have probed MDMS');
+    assert(services.mdms.status === 'available', `MDMS should be available: ${JSON.stringify(services.mdms)}`);
+
+    // Re-configure with named environment for subsequent tests
+    await call('configure', { environment: targetEnv, username, password });
+    return [`Connected via base_url, probed ${Object.keys(services).length} services`];
+  });
+
+  await test('1.7 get_environment_info', async () => {
     const r = await call('get_environment_info');
     assert(r.success === true, 'get_environment_info failed');
     assert(r.authenticated === true, 'should be authenticated');
@@ -352,7 +374,7 @@ async function main() {
     return ['get_environment_info'];
   });
 
-  await test('1.7 mdms_get_tenants', async () => {
+  await test('1.8 mdms_get_tenants', async () => {
     const r = await call('mdms_get_tenants');
     assert(r.success === true, 'mdms_get_tenants failed');
     assert((r.count as number) > 0, 'no tenants found');
@@ -371,7 +393,7 @@ async function main() {
     return ['mdms_get_tenants'];
   });
 
-  await test('1.8 health_check', async () => {
+  await test('1.9 health_check', async () => {
     const r = await call('health_check', { tenant_id: state.tenantId, timeout_ms: 15000 });
     assert(r.success === true, 'health_check failed');
     const summary = r.summary as Record<string, number>;
@@ -379,7 +401,7 @@ async function main() {
     return ['health_check'];
   });
 
-  await test('1.9 init: session initialization with PGR intent', async () => {
+  await test('1.10 init: session initialization with PGR intent', async () => {
     const r = await call('init', { user_name: 'Test User', purpose: 'set up PGR complaints', telemetry: true });
     assert(r.success === true, 'init failed');
     assert(r.session != null, 'should return session info');
@@ -396,7 +418,7 @@ async function main() {
     return ['init'];
   });
 
-  await test('1.10 session_checkpoint', async () => {
+  await test('1.11 session_checkpoint', async () => {
     const r = await call('session_checkpoint', { summary: 'Integration test checkpoint' });
     assert(r.success === true, 'session_checkpoint failed');
     const cp = r.checkpoint as Record<string, unknown>;
