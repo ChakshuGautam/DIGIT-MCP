@@ -17,6 +17,10 @@ import { registerAllTools } from './src/tools/index.js';
 import { digitApi } from './src/services/digit-api.js';
 import { sessionStore } from './src/services/session-store.js';
 import type { ToolGroup } from './src/types/index.js';
+import ExcelJS from 'exceljs';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 // ════════════════════════════════════════════════════════════════════
 // Test infrastructure
@@ -26,7 +30,7 @@ const ALL_TOOL_NAMES: readonly string[] = [
   'access_actions_search', 'access_roles_search', 'api_catalog',
   'boundary_create', 'boundary_hierarchy_search',
   'boundary_mgmt_download', 'boundary_mgmt_generate', 'boundary_mgmt_process', 'boundary_mgmt_search',
-  'configure', 'db_counts', 'decrypt_data', 'discover_tools', 'docs_get', 'docs_search',
+  'city_setup_from_xlsx', 'configure', 'db_counts', 'decrypt_data', 'discover_tools', 'docs_get', 'docs_search',
   'employee_create', 'employee_update', 'enable_tools', 'encrypt_data',
   'filestore_get_urls', 'filestore_upload', 'get_environment_info', 'health_check',
   'idgen_generate', 'init', 'kafka_lag', 'localization_search', 'localization_upsert', 'location_search',
@@ -238,6 +242,20 @@ async function waitForCondition<T>(
     }
   }
   throw new Error(`${label}: not satisfied after ${maxAttempts} attempts (${maxAttempts * intervalMs}ms)`);
+}
+
+/** Create a temporary xlsx file with given sheet data. Returns the file path. */
+async function createTempXlsx(sheets: Record<string, string[][]>): Promise<string> {
+  const wb = new ExcelJS.Workbook();
+  for (const [name, data] of Object.entries(sheets)) {
+    const ws = wb.addWorksheet(name);
+    for (const row of data) {
+      ws.addRow(row);
+    }
+  }
+  const tmpPath = path.join(os.tmpdir(), `digit-test-${Date.now()}-${Math.random().toString(36).slice(2)}.xlsx`);
+  await wb.xlsx.writeFile(tmpPath);
+  return tmpPath;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -2063,11 +2081,62 @@ async function main() {
   });
 
   // ──────────────────────────────────────────────────────────────────
-  // Section 18: Cleanup test data on pg
+  // Section 18: xlsx-Based Tenant Setup Tests
   // ──────────────────────────────────────────────────────────────────
-  console.log('\n── Section 18: Cleanup ──');
+  console.log('\n── Section 18: xlsx-Based Tenant Setup Tests ──');
 
-  await test('18.1 cleanup: soft-delete test MDMS record via mdms_search', async () => {
+  await test('18.1 city_setup_from_xlsx: masters file (departments + complaint types)', async () => {
+    const mastersPath = await createTempXlsx({
+      'Department And Designation Master': [
+        ['Department Name*', 'Designation Name*', 'Jurisdiction'],
+        [`${TEST_PREFIX} Roads`, `${TEST_PREFIX} Engineer`, 'City'],
+        [`${TEST_PREFIX} Roads`, `${TEST_PREFIX} Supervisor`, 'City'],
+        [`${TEST_PREFIX} Water`, `${TEST_PREFIX} Inspector`, 'City'],
+      ],
+      'Complaint Type Master': [
+        ['Complaint Type*', 'Complaint sub type*', 'Department Name*', 'Resolution Time (Hours)*', 'Search Words*', 'Priority'],
+        [`${TEST_PREFIX} Road Issue`, '', `${TEST_PREFIX} Roads`, '48', 'road,pothole', '3'],
+        ['', `${TEST_PREFIX} Pothole`, '', '', '', ''],
+      ],
+    });
+
+    try {
+      const r = await call('city_setup_from_xlsx', {
+        tenant_id: state.tenantId,
+        masters_file: mastersPath,
+      });
+      assert(r.success !== undefined, 'should return success field');
+      assert(r.phases, 'should return phases');
+      const phases = r.phases as Record<string, Record<string, unknown>>;
+      assert(phases.masters, 'should have masters phase');
+      assert(phases.masters.status === 'completed' || phases.masters.departments,
+        `masters phase should complete: ${JSON.stringify(phases.masters)}`);
+      return [`city_setup_from_xlsx`];
+    } finally {
+      fs.unlinkSync(mastersPath);
+    }
+  });
+
+  await test('18.2 city_setup_from_xlsx: validation errors', async () => {
+    // No dot in tenant_id
+    const r1 = await call('city_setup_from_xlsx', { tenant_id: 'nodot' });
+    assert(r1.success === false, 'should fail without dot in tenant_id');
+    assert((r1.error as string).includes('dot'), 'error should mention dot requirement');
+
+    // No files provided
+    const r2 = await call('city_setup_from_xlsx', { tenant_id: 'pg.test' });
+    assert(r2.success === false, 'should fail without any files');
+    assert((r2.error as string).includes('file'), 'error should mention file requirement');
+
+    return ['city_setup_from_xlsx'];
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // Section 19: Cleanup test data on pg
+  // ──────────────────────────────────────────────────────────────────
+  console.log('\n── Section 19: Cleanup ──');
+
+  await test('19.1 cleanup: soft-delete test MDMS record via mdms_search', async () => {
     // Verify the test MDMS record exists via the mdms_search tool, then deactivate via direct API.
     const searchResult = await call('mdms_search', {
       tenant_id: state.stateTenantId,
@@ -2096,7 +2165,7 @@ async function main() {
     return ['mdms_search'];
   });
 
-  await test('18.2 cleanup: deactivate second test employee', async () => {
+  await test('19.2 cleanup: deactivate second test employee', async () => {
     if (!state.employeeCode2) {
       console.log(`        No second employee to clean up (skipped)`);
       return ['employee_update'];
@@ -2110,7 +2179,7 @@ async function main() {
     assert(typeof r.success === 'boolean', `employee_update should return success boolean, got: ${typeof r.success}`);
     const isHrmsUpdateBug = !r.success && ((r.error as string) || '').includes('getUser()');
     if (isHrmsUpdateBug) {
-      markKnownBug('18.2 cleanup: deactivate second test employee', 'HRMS _update NPE on Employee.getUser()');
+      markKnownBug('19.2 cleanup: deactivate second test employee', 'HRMS _update NPE on Employee.getUser()');
     } else if (r.success) {
       console.log(`        Deactivated second employee: ${state.employeeCode2}`);
     } else {
