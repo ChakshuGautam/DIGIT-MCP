@@ -8,6 +8,8 @@ import type { PaginationOptions } from '../utils/pagination.js';
 import { buildOrderedLevels } from './validators.js';
 import { validateTenantId, validateResourceId } from '../utils/validation.js';
 import { applyFieldMask } from '../utils/field-mask.js';
+import { probeServices } from '../utils/probe.js';
+import type { ProbeReport } from '../utils/probe.js';
 
 /**
  * Search for MDMS records across all state tenants.
@@ -174,10 +176,17 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
     inputSchema: {
       type: 'object' as const,
       properties: {
+        base_url: {
+          type: 'string',
+          description:
+            'Base URL of a DIGIT instance (e.g. "https://unified-dev.digit.org"). ' +
+            'When provided, connects directly to this URL instead of using a named environment. ' +
+            'Runs service probing to detect available APIs.',
+        },
         environment: {
           type: 'string',
           description:
-            'Environment to connect to. Available: ' +
+            'Environment to connect to. Optional when base_url is provided. Available: ' +
             Object.keys(ENVIRONMENTS).join(', '),
         },
         username: {
@@ -203,9 +212,20 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       },
     },
     handler: async (args) => {
-      // Switch environment if requested
-      if (args.environment) {
-        digitApi.setEnvironment(args.environment as string);
+      const baseUrl = args.base_url as string | undefined;
+      const envKey = (args.environment as string) || process.env.CRS_ENVIRONMENT || 'chakshu-digit';
+
+      // Switch environment: ad-hoc URL or named environment
+      if (baseUrl) {
+        digitApi.setAdHocEnvironment(baseUrl);
+      } else {
+        if (!ENVIRONMENTS[envKey]) {
+          return JSON.stringify({
+            success: false,
+            error: `Unknown environment "${envKey}". Available: ${Object.keys(ENVIRONMENTS).join(', ')}`,
+          }, null, 2);
+        }
+        digitApi.setEnvironment(envKey);
       }
 
       const env = digitApi.getEnvironmentInfo();
@@ -336,6 +356,20 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       const auth = digitApi.getAuthInfo();
       const envAfterLogin = digitApi.getEnvironmentInfo();
 
+      // ── Service probing (when using ad-hoc base_url) ──
+      let probeReport: ProbeReport | undefined;
+      if (baseUrl) {
+        const authInfo = digitApi.getAuthInfo();
+        probeReport = await probeServices(baseUrl, authInfo.token!);
+
+        // Apply detected endpoint overrides so subsequent tool calls use correct paths
+        if (Object.keys(probeReport.detectedEndpointOverrides).length > 0) {
+          digitApi.setAdHocEnvironment(baseUrl, probeReport.detectedEndpointOverrides);
+          // Re-authenticate since setAdHocEnvironment clears auth
+          await digitApi.login(username, password, usedLoginTenant);
+        }
+      }
+
       return JSON.stringify(
         {
           success: true,
@@ -343,6 +377,11 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           environment: { name: envAfterLogin.name, url: envAfterLogin.url },
           stateTenantId: envAfterLogin.stateTenantId,
           loginTenantId: usedLoginTenant,
+          ...(baseUrl ? { source: 'base_url' } : {}),
+          ...(probeReport ? {
+            services: probeReport.services,
+            detectedEndpointOverrides: probeReport.detectedEndpointOverrides,
+          } : {}),
           ...(rolesProvisioned && {
             rolesProvisioned: {
               tenant: explicitRoot,
