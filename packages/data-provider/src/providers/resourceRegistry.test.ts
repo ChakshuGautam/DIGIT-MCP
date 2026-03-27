@@ -3,6 +3,7 @@ import * as assert from 'node:assert/strict';
 import {
   getResourceConfig, getAllResources, getDedicatedResources,
   getGenericMdmsResources, getResourceLabel, getResourceIdField,
+  getResourceBySchema,
 } from './resourceRegistry.js';
 
 describe('resourceRegistry', () => {
@@ -76,5 +77,20 @@ describe('resourceRegistry', () => {
     assert.ok(Object.keys(all).length > 15, 'Should have 15+ resources');
     assert.ok(all['departments']);
     assert.ok(all['state-info']);
+  });
+
+  it('getResourceBySchema returns resource name for known schema', () => {
+    const result = getResourceBySchema('common-masters.Department');
+    assert.strictEqual(result, 'departments');
+  });
+
+  it('getResourceBySchema returns undefined for unknown schema', () => {
+    const result = getResourceBySchema('nonexistent.Schema');
+    assert.strictEqual(result, undefined);
+  });
+
+  it('getResourceBySchema finds role-actions by schema code', () => {
+    const result = getResourceBySchema('ACCESSCONTROL-ROLEACTIONS.roleactions');
+    assert.strictEqual(result, 'role-actions');
   });
 });

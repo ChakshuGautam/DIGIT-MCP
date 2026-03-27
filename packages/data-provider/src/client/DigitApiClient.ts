@@ -361,35 +361,51 @@ export class DigitApiClient {
   // --- Boundary Management ---
 
   async boundaryMgmtProcess(tenantId: string, resourceDetails: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const data = await this.request<Record<string, unknown>>(this.endpoint('BNDRY_MGMT_PROCESS'), {
-      RequestInfo: this.buildRequestInfo(),
-      ResourceDetails: resourceDetails,
-    });
+    const params = new URLSearchParams({ tenantId });
+    const data = await this.request<Record<string, unknown>>(
+      `${this.endpoint('BNDRY_MGMT_PROCESS')}?${params.toString()}`,
+      { RequestInfo: this.buildRequestInfo(), ResourceDetails: resourceDetails },
+    );
     return data;
   }
 
   async boundaryMgmtProcessSearch(tenantId: string): Promise<Record<string, unknown>[]> {
-    const data = await this.request<{ ResourceDetails?: Record<string, unknown>[] }>(this.endpoint('BNDRY_MGMT_PROCESS_SEARCH'), {
-      RequestInfo: this.buildRequestInfo(),
-      SearchCriteria: { tenantId },
-    });
-    return data.ResourceDetails || [];
+    const params = new URLSearchParams({ tenantId });
+    try {
+      const data = await this.request<{ ResourceDetails?: Record<string, unknown>[] }>(
+        `${this.endpoint('BNDRY_MGMT_PROCESS_SEARCH')}?${params.toString()}`,
+        { RequestInfo: this.buildRequestInfo() },
+      );
+      return data.ResourceDetails || [];
+    } catch (e: unknown) {
+      // "invalid path" means no boundary data has been uploaded/processed for this tenant — return empty
+      if (e instanceof Error && e.message?.includes('invalid path')) return [];
+      throw e;
+    }
   }
 
   async boundaryMgmtGenerate(tenantId: string, resourceDetails: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const data = await this.request<Record<string, unknown>>(this.endpoint('BNDRY_MGMT_GENERATE'), {
-      RequestInfo: this.buildRequestInfo(),
-      ResourceDetails: resourceDetails,
-    });
+    const params = new URLSearchParams({ tenantId });
+    const data = await this.request<Record<string, unknown>>(
+      `${this.endpoint('BNDRY_MGMT_GENERATE')}?${params.toString()}`,
+      { RequestInfo: this.buildRequestInfo(), ResourceDetails: resourceDetails },
+    );
     return data;
   }
 
   async boundaryMgmtGenerateSearch(tenantId: string): Promise<Record<string, unknown>[]> {
-    const data = await this.request<{ ResourceDetails?: Record<string, unknown>[] }>(this.endpoint('BNDRY_MGMT_GENERATE_SEARCH'), {
-      RequestInfo: this.buildRequestInfo(),
-      SearchCriteria: { tenantId },
-    });
-    return data.ResourceDetails || [];
+    const params = new URLSearchParams({ tenantId });
+    try {
+      const data = await this.request<{ ResourceDetails?: Record<string, unknown>[] }>(
+        `${this.endpoint('BNDRY_MGMT_GENERATE_SEARCH')}?${params.toString()}`,
+        { RequestInfo: this.buildRequestInfo() },
+      );
+      return data.ResourceDetails || [];
+    } catch (e: unknown) {
+      // "invalid path" means no generated boundary data for this tenant — return empty
+      if (e instanceof Error && e.message?.includes('invalid path')) return [];
+      throw e;
+    }
   }
 
   // --- PGR ---
@@ -512,11 +528,12 @@ export class DigitApiClient {
     return data.roles || [];
   }
 
-  async accessActionsSearch(tenantId: string, roleCodes: string[]): Promise<Record<string, unknown>[]> {
+  async accessActionsSearch(tenantId: string, roleCodes: string[], actionMaster = 'actions-test'): Promise<Record<string, unknown>[]> {
     const data = await this.request<{ actions?: Record<string, unknown>[] }>(this.endpoint('ACCESS_ACTIONS_SEARCH'), {
       RequestInfo: this.buildRequestInfo(),
       roleCodes,
       tenantId,
+      actionMaster,
     });
     return data.actions || [];
   }
@@ -595,20 +612,6 @@ export class DigitApiClient {
     if (!response.ok) throw new Error(`Decryption failed: HTTP ${response.status}`);
     const data = await response.json();
     return Array.isArray(data) ? data : [];
-  }
-
-  // --- Location (legacy boundary service) ---
-
-  async locationBoundarySearch(tenantId: string, hierarchyType?: string, boundaryType?: string): Promise<Record<string, unknown>[]> {
-    const params = new URLSearchParams({ tenantId });
-    if (hierarchyType) params.append('hierarchyType', hierarchyType);
-    if (boundaryType) params.append('boundaryType', boundaryType);
-
-    const data = await this.request<{ TenantBoundary?: Record<string, unknown>[] }>(
-      `${this.endpoint('LOCATION_BOUNDARY_SEARCH')}?${params.toString()}`,
-      { RequestInfo: this.buildRequestInfo() },
-    );
-    return data.TenantBoundary || [];
   }
 
   // --- Inbox ---

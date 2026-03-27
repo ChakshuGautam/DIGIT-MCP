@@ -1335,34 +1335,45 @@ describe('DataProvider Integration Tests', () => {
   // =========================================================================
 
   describe('Scenario: Boundary Relationship Update', () => {
-    it('updates a boundary relationship (re-submits existing data)', async (context) => {
+    it('updates a boundary relationship (re-parents a leaf node)', async () => {
       // 1. Fetch existing relationships for the city tenant
       const rels = await client.boundaryRelationshipSearch(CITY_TENANT, 'ADMIN');
       assert.ok(rels.length > 0, 'Should have existing boundary relationships');
 
-      // 2. Re-submit the first relationship tree to verify the update endpoint responds.
-      //    We pass the relationship as-is so we do not mutate any data.
-      const firstRel = rels[0];
-      try {
-        const result = await client.boundaryRelationshipUpdate(CITY_TENANT, firstRel);
-        assert.ok(result, 'Should return updated relationship data');
-      } catch (e: any) {
-        // If the endpoint is not deployed or rejects a no-op update, skip gracefully
-        if (
-          e.message?.includes('not deployed') ||
-          e.message?.includes('ECONNREFUSED') ||
-          e.message?.includes('does not exist') ||
-          e.message?.includes('dns') ||
-          e.message?.includes('invalid path') ||
-          e.status === 404 ||
-          e.status === 502 ||
-          e.status === 503
-        ) {
-          context.skip('Boundary relationship update service not available');
-          return;
+      // 2. Walk the tree to find a child node with its parent code
+      const tree = rels[0];
+      const hierarchyType = (tree as any).hierarchyType || 'ADMIN';
+      let childCode: string | undefined;
+      let childType: string | undefined;
+      let parentCode: string | undefined;
+      const findChild = (nodes: unknown[]): void => {
+        if (!Array.isArray(nodes) || childCode) return;
+        for (const n of nodes as Record<string, unknown>[]) {
+          const children = (n.children || []) as Record<string, unknown>[];
+          // Look for a node that has children — use the first child as our target
+          if (children.length > 0) {
+            childCode = children[0].code as string;
+            childType = children[0].boundaryType as string;
+            parentCode = n.code as string;
+            return;
+          }
+          // Also recurse in case this node has no children but siblings do
         }
-        throw e;
-      }
+        // Try deeper levels
+        for (const n of nodes as Record<string, unknown>[]) {
+          findChild((n.children || []) as unknown[]);
+          if (childCode) return;
+        }
+      };
+      findChild((tree as any).boundary || []);
+      assert.ok(childCode, 'Should find a child boundary in the tree');
+      assert.ok(parentCode, 'Child should have a parent');
+
+      // 3. Re-submit the child with the same parent (no-op update, verifies endpoint works)
+      const result = await client.boundaryRelationshipUpdate(CITY_TENANT, {
+        code: childCode!, hierarchyType, boundaryType: childType!, parent: parentCode!,
+      });
+      assert.ok(result, 'Should return updated relationship data');
     });
   });
 
@@ -1371,69 +1382,24 @@ describe('DataProvider Integration Tests', () => {
   // =========================================================================
 
   describe('Scenario: Access Actions Search', () => {
-    it('finds actions for GRO role', async (context) => {
-      try {
-        const actions = await client.accessActionsSearch(DIGIT_TENANT, ['GRO']);
-        assert.ok(actions.length > 0, 'GRO role should have actions');
-        const first = actions[0] as Record<string, unknown>;
-        assert.ok(
-          first.url || first.serviceCode || first.actionUrl,
-          'Action should have url, serviceCode, or actionUrl',
-        );
-      } catch (e: any) {
-        if (
-          e.message?.includes('ACCESSCONTROL') ||
-          e.message?.includes('Missing property') ||
-          e.message?.includes('MdmsRes') ||
-          e.message?.includes('dns') ||
-          e.message?.includes('ECONNREFUSED') ||
-          e.status === 404 || e.status === 502 || e.status === 503
-        ) {
-          context.skip('Access control actions service not configured in this environment');
-          return;
-        }
-        throw e;
-      }
+    it('finds actions for GRO role', async () => {
+      const actions = await client.accessActionsSearch(DIGIT_TENANT, ['GRO']);
+      assert.ok(actions.length > 0, 'GRO role should have actions');
+      const first = actions[0] as Record<string, unknown>;
+      assert.ok(
+        first.url || first.serviceCode || first.actionUrl,
+        'Action should have url, serviceCode, or actionUrl',
+      );
     });
 
-    it('finds actions for multiple roles', async (context) => {
-      try {
-        const actions = await client.accessActionsSearch(DIGIT_TENANT, ['CITIZEN', 'EMPLOYEE']);
-        assert.ok(actions.length > 0, 'Should return actions for CITIZEN and EMPLOYEE roles');
-      } catch (e: any) {
-        if (
-          e.message?.includes('ACCESSCONTROL') ||
-          e.message?.includes('Missing property') ||
-          e.message?.includes('MdmsRes') ||
-          e.message?.includes('dns') ||
-          e.message?.includes('ECONNREFUSED') ||
-          e.status === 404 || e.status === 502 || e.status === 503
-        ) {
-          context.skip('Access control actions service not configured in this environment');
-          return;
-        }
-        throw e;
-      }
+    it('finds actions for multiple roles', async () => {
+      const actions = await client.accessActionsSearch(DIGIT_TENANT, ['CITIZEN', 'EMPLOYEE']);
+      assert.ok(actions.length > 0, 'Should return actions for CITIZEN and EMPLOYEE roles');
     });
 
-    it('returns empty array for unknown role', async (context) => {
-      try {
-        const actions = await client.accessActionsSearch(DIGIT_TENANT, [`NONEXISTENT_ROLE_${Date.now()}`]);
-        assert.ok(Array.isArray(actions), 'Should return an array (possibly empty)');
-      } catch (e: any) {
-        if (
-          e.message?.includes('ACCESSCONTROL') ||
-          e.message?.includes('Missing property') ||
-          e.message?.includes('MdmsRes') ||
-          e.message?.includes('dns') ||
-          e.message?.includes('ECONNREFUSED') ||
-          e.status === 404 || e.status === 502 || e.status === 503
-        ) {
-          context.skip('Access control actions service not configured in this environment');
-          return;
-        }
-        throw e;
-      }
+    it('returns empty array for unknown role', async () => {
+      const actions = await client.accessActionsSearch(DIGIT_TENANT, [`NONEXISTENT_ROLE_${Date.now()}`]);
+      assert.ok(Array.isArray(actions), 'Should return an array (possibly empty)');
     });
   });
 
@@ -1477,56 +1443,26 @@ describe('DataProvider Integration Tests', () => {
   });
 
   // =========================================================================
-  // Scenario: Location Boundary Search (legacy - may not be deployed)
+  // Scenario: Boundary Relationship Search (via boundary-service)
   // =========================================================================
 
-  describe('Scenario: Location Boundary Search', () => {
-    it('searches legacy location boundaries', async (context) => {
-      try {
-        const result = await client.locationBoundarySearch(CITY_TENANT, 'ADMIN');
-        // If the service is deployed, it should return an array
-        assert.ok(Array.isArray(result), 'Should return an array');
-      } catch (e: any) {
-        if (
-          e.status === 404 ||
-          e.message?.includes('not found') ||
-          e.message?.includes('ECONNREFUSED') ||
-          e.message?.includes('502') ||
-          e.message?.includes('503') ||
-          e.message?.includes('Cannot read') ||
-          e.message?.includes('not deployed') ||
-          e.message?.includes('dns') ||
-          e.message?.includes('server failure') ||
-          e.message?.includes('invalid path')
-        ) {
-          context.skip('Legacy egov-location service not deployed');
-          return;
-        }
-        throw e;
-      }
+  describe('Scenario: Boundary Relationship Search', () => {
+    it('searches boundary relationships by hierarchy type', async () => {
+      const result = await client.boundaryRelationshipSearch(CITY_TENANT, 'ADMIN');
+      assert.ok(Array.isArray(result), 'Should return an array');
+      assert.ok(result.length > 0, 'Should return boundary relationships');
+      const first = result[0] as Record<string, unknown>;
+      assert.equal(first.hierarchyType, 'ADMIN', 'Should be ADMIN hierarchy');
+      assert.ok(Array.isArray(first.boundary), 'Should have boundary tree');
     });
 
-    it('searches with boundary type filter', async (context) => {
-      try {
-        const result = await client.locationBoundarySearch(CITY_TENANT, 'ADMIN', 'City');
-        assert.ok(Array.isArray(result), 'Should return an array');
-      } catch (e: any) {
-        if (
-          e.status === 404 ||
-          e.message?.includes('not found') ||
-          e.message?.includes('ECONNREFUSED') ||
-          e.message?.includes('502') ||
-          e.message?.includes('503') ||
-          e.message?.includes('not deployed') ||
-          e.message?.includes('dns') ||
-          e.message?.includes('server failure') ||
-          e.message?.includes('invalid path')
-        ) {
-          context.skip('Legacy egov-location service not deployed');
-          return;
-        }
-        throw e;
-      }
+    it('returns tenant boundary tree with nested children', async () => {
+      const result = await client.boundaryRelationshipSearch(CITY_TENANT, 'ADMIN');
+      assert.ok(result.length > 0, 'Should have results');
+      const tree = (result[0] as any).boundary as Record<string, unknown>[];
+      assert.ok(tree.length > 0, 'Boundary tree should have nodes');
+      assert.ok(tree[0].code, 'Root node should have code');
+      assert.ok(tree[0].boundaryType, 'Root node should have boundaryType');
     });
   });
 
@@ -1535,54 +1471,14 @@ describe('DataProvider Integration Tests', () => {
   // =========================================================================
 
   describe('Scenario: Boundary Management', () => {
-    it('process search returns array', async (context) => {
-      try {
-        const result = await client.boundaryMgmtProcessSearch(CITY_TENANT);
-        assert.ok(Array.isArray(result), 'Should return an array');
-      } catch (e: any) {
-        if (
-          e.status === 404 ||
-          e.status === 502 ||
-          e.status === 503 ||
-          e.message?.includes('not found') ||
-          e.message?.includes('ECONNREFUSED') ||
-          e.message?.includes('502') ||
-          e.message?.includes('503') ||
-          e.message?.includes('not deployed') ||
-          e.message?.includes('dns') ||
-          e.message?.includes('server failure') ||
-          e.message?.includes('invalid path')
-        ) {
-          context.skip('Boundary management service not deployed');
-          return;
-        }
-        throw e;
-      }
+    it('process search returns array', async () => {
+      const result = await client.boundaryMgmtProcessSearch(CITY_TENANT);
+      assert.ok(Array.isArray(result), 'Should return an array');
     });
 
-    it('generate search returns array', async (context) => {
-      try {
-        const result = await client.boundaryMgmtGenerateSearch(CITY_TENANT);
-        assert.ok(Array.isArray(result), 'Should return an array');
-      } catch (e: any) {
-        if (
-          e.status === 404 ||
-          e.status === 502 ||
-          e.status === 503 ||
-          e.message?.includes('not found') ||
-          e.message?.includes('ECONNREFUSED') ||
-          e.message?.includes('502') ||
-          e.message?.includes('503') ||
-          e.message?.includes('not deployed') ||
-          e.message?.includes('dns') ||
-          e.message?.includes('server failure') ||
-          e.message?.includes('invalid path')
-        ) {
-          context.skip('Boundary management service not deployed');
-          return;
-        }
-        throw e;
-      }
+    it('generate search returns array', async () => {
+      const result = await client.boundaryMgmtGenerateSearch(CITY_TENANT);
+      assert.ok(Array.isArray(result), 'Should return an array');
     });
   });
 

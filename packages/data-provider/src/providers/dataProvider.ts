@@ -3,6 +3,12 @@ import type { DigitApiClient } from '../client/DigitApiClient.js';
 import type { MdmsRecord } from '../client/types.js';
 import { getResourceConfig, type ResourceConfig } from './resourceRegistry.js';
 
+/** Extended data provider type with DIGIT-specific custom methods */
+export type DigitDataProvider = DataProvider & {
+  /** Generate a formatted ID via the DIGIT idgen service */
+  idgenGenerate: (idName: string, format?: string) => Promise<string>;
+};
+
 // --- Helpers ---
 
 function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
@@ -72,24 +78,76 @@ async function mdmsGetList(client: DigitApiClient, config: ResourceConfig, tenan
 }
 
 async function hrmsGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string): Promise<RaRecord[]> {
+  // First try searching the given tenant
   const employees = await client.employeeSearch(tenantId, { limit: 500 });
-  return employees.map((e) => normalizeRecord(e, config));
+  if (employees.length > 0) return employees.map((e) => normalizeRecord(e, config));
+
+  // If root tenant returned 0 results, search all city-level sub-tenants
+  if (!tenantId.includes('.')) {
+    const tenantRecords = await client.mdmsSearch(tenantId, 'tenant.tenants', { limit: 200 });
+    const cityTenants = tenantRecords
+      .filter((r) => r.isActive && r.data?.code && String(r.data.code).startsWith(`${tenantId}.`))
+      .map((r) => String(r.data.code));
+
+    if (cityTenants.length > 0) {
+      const results = await Promise.all(
+        cityTenants.map((ct) => client.employeeSearch(ct, { limit: 500 }).catch(() => []))
+      );
+      const allEmployees = results.flat();
+      return allEmployees.map((e) => normalizeRecord(e, config));
+    }
+  }
+
+  return [];
 }
 
 async function boundaryGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string): Promise<RaRecord[]> {
+  function flattenTrees(trees: Record<string, unknown>[]): RaRecord[] {
+    const flat: RaRecord[] = [];
+    function flatten(nodes: unknown[], parentCode?: string) {
+      if (!Array.isArray(nodes)) return;
+      for (const node of nodes as Record<string, unknown>[]) {
+        flat.push(normalizeRecord({ ...node, parentCode }, config));
+        if (Array.isArray(node.children)) flatten(node.children as unknown[], node.code as string);
+      }
+    }
+    for (const tree of trees) {
+      flatten((tree.boundary || []) as unknown[]);
+    }
+    return flat;
+  }
+
   const trees = await client.boundaryRelationshipSearch(tenantId, 'ADMIN');
-  const flat: RaRecord[] = [];
-  function flatten(nodes: unknown[], parentCode?: string) {
-    if (!Array.isArray(nodes)) return;
-    for (const node of nodes as Record<string, unknown>[]) {
-      flat.push(normalizeRecord({ ...node, parentCode }, config));
-      if (Array.isArray(node.children)) flatten(node.children as unknown[], node.code as string);
+  const flat = flattenTrees(trees);
+  if (flat.length > 0) return flat;
+
+  // If root tenant returned 0, search city-level sub-tenants that have boundary hierarchies
+  if (!tenantId.includes('.')) {
+    const tenantRecords = await client.mdmsSearch(tenantId, 'tenant.tenants', { limit: 200 });
+    const cityTenants = tenantRecords
+      .filter((r) => r.isActive && r.data?.code && String(r.data.code).startsWith(`${tenantId}.`))
+      .map((r) => String(r.data.code));
+
+    if (cityTenants.length > 0) {
+      // Pre-filter: only query tenants that have a boundary hierarchy defined (avoids 400 errors)
+      const hierarchyChecks = await Promise.allSettled(
+        cityTenants.map((ct) => client.boundaryHierarchySearch(ct))
+      );
+      const tenantsWithHierarchies = cityTenants.filter((_, i) => {
+        const result = hierarchyChecks[i];
+        return result.status === 'fulfilled' && Array.isArray(result.value) && result.value.length > 0;
+      });
+
+      if (tenantsWithHierarchies.length > 0) {
+        const results = await Promise.all(
+          tenantsWithHierarchies.map((ct) => client.boundaryRelationshipSearch(ct, 'ADMIN').catch(() => []))
+        );
+        return results.flatMap((trees) => flattenTrees(trees as Record<string, unknown>[]));
+      }
     }
   }
-  for (const tree of trees) {
-    flatten((tree.boundary || []) as unknown[]);
-  }
-  return flat;
+
+  return [];
 }
 
 async function pgrGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string, filter?: Record<string, unknown>): Promise<RaRecord[]> {
@@ -131,13 +189,50 @@ async function workflowBsGetList(client: DigitApiClient, config: ResourceConfig,
 
 async function workflowProcessGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string, filter?: Record<string, unknown>): Promise<RaRecord[]> {
   const businessIds = filter?.businessId ? [String(filter.businessId)] : undefined;
-  const processes = await client.workflowProcessSearch(tenantId, businessIds, { limit: 100 });
-  return processes.map((p) => normalizeRecord(p, config));
+  if (businessIds) {
+    const processes = await client.workflowProcessSearch(tenantId, businessIds, { limit: 100 });
+    return processes.map((p) => normalizeRecord(p, config));
+  }
+  // No filter — fetch recent PGR complaints and search workflow at each city tenant
+  try {
+    const wrappers = await client.pgrSearch(tenantId, { limit: 50 });
+    if (wrappers.length === 0) return [];
+
+    // Group complaint IDs by their tenant
+    const byTenant = new Map<string, string[]>();
+    for (const w of wrappers) {
+      const svc = (w.service || w) as Record<string, unknown>;
+      const id = svc.serviceRequestId as string;
+      const t = (svc.tenantId as string) || tenantId;
+      if (!id) continue;
+      const arr = byTenant.get(t) || [];
+      arr.push(id);
+      byTenant.set(t, arr);
+    }
+
+    // Search workflow processes at each city tenant in parallel
+    const results = await Promise.all(
+      Array.from(byTenant.entries()).map(([t, ids]) =>
+        client.workflowProcessSearch(t, ids, { limit: 200 }).catch(() => [])
+      )
+    );
+    return results.flat().map((p) => normalizeRecord(p, config));
+  } catch {
+    return [];
+  }
 }
 
 async function accessRoleGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string): Promise<RaRecord[]> {
   const roles = await client.accessRolesSearch(tenantId);
   return roles.map((r) => normalizeRecord(r, config));
+}
+
+async function accessActionGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string, filter?: Record<string, unknown>): Promise<RaRecord[]> {
+  const roleCodes = filter?.roleCodes
+    ? (filter.roleCodes as string[])
+    : ['CITIZEN', 'EMPLOYEE', 'GRO', 'CSR'];
+  const actions = await client.accessActionsSearch(tenantId, roleCodes);
+  return actions.map((a) => normalizeRecord(a, config));
 }
 
 async function mdmsSchemaGetList(client: DigitApiClient, config: ResourceConfig, tenantId: string): Promise<RaRecord[]> {
@@ -152,7 +247,7 @@ async function boundaryHierarchyGetList(client: DigitApiClient, config: Resource
 
 // --- Factory ---
 
-export function createDigitDataProvider(client: DigitApiClient, tenantId: string): DataProvider {
+export function createDigitDataProvider(client: DigitApiClient, tenantId: string): DigitDataProvider {
   function resolveConfig(resource: string): ResourceConfig {
     const config = getResourceConfig(resource);
     if (!config) throw new Error(`Unknown resource: ${resource}`);
@@ -171,13 +266,14 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
       case 'workflow-bs': return workflowBsGetList(client, config, tenantId, filter);
       case 'workflow-process': return workflowProcessGetList(client, config, tenantId, filter);
       case 'access-role': return accessRoleGetList(client, config, tenantId);
+      case 'access-action': return accessActionGetList(client, config, tenantId, filter);
       case 'mdms-schema': return mdmsSchemaGetList(client, config, tenantId);
       case 'boundary-hierarchy': return boundaryHierarchyGetList(client, config, tenantId);
       default: throw new Error(`Unsupported resource type: ${config.type}`);
     }
   }
 
-  const provider: DataProvider = {
+  const provider: DigitDataProvider = {
     async getList(resource, params): Promise<GetListResult> {
       const { page = 1, perPage = 25 } = params.pagination ?? {};
       const { field = 'id', order = 'ASC' } = params.sort ?? {};
@@ -229,13 +325,10 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
         // Search entity table directly to get full data (additionalDetails, geometry, auditDetails)
         const entities = await client.boundarySearch(tenantId, [String(params.id)]);
         if (entities.length) {
-          // Merge with tree data (boundaryType, parentCode) if available
-          const all = await fetchAll(resource);
-          const treeNode = all.find((r) => String(r.id) === String(params.id));
-          const merged = { ...(treeNode || {}), ...entities[0], id: String(params.id) };
-          return { data: normalizeRecord(merged as Record<string, unknown>, config) };
+          // Return entity data directly — avoids expensive fetchAll sub-tenant scan
+          return { data: normalizeRecord(entities[0] as Record<string, unknown>, config) };
         }
-        // Fall back to tree-only data
+        // Fall back to tree-only data (triggers sub-tenant aggregation)
         const all = await fetchAll(resource);
         const found = all.find((r) => String(r.id) === String(params.id));
         if (!found) throw new Error(`Record not found: ${params.id}`);
@@ -339,6 +432,11 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
         if (lastErr) throw lastErr;
         return { data: { ...data, id: code, code, boundaryType } as RaRecord };
       }
+      if (config.type === 'user') {
+        const data = params.data as Record<string, unknown>;
+        const user = await client.userCreate(data, tenantId);
+        return { data: normalizeRecord(user, config) };
+      }
       throw new Error(`Create not supported for resource type: ${config.type}`);
     },
 
@@ -363,10 +461,17 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
         const wrappers = await client.pgrSearch(tenantId, { serviceRequestId: String(params.id) });
         if (!wrappers.length) throw new Error(`Complaint not found: ${params.id}`);
         const service = ((wrappers[0] as Record<string, unknown>).service || wrappers[0]) as Record<string, unknown>;
+        // Normalize assignees: accept a single string (from form select) or an array
+        let assignees: string[] | undefined;
+        if (data.assignee) {
+          assignees = [String(data.assignee)];
+        } else if (Array.isArray(data.assignees)) {
+          assignees = data.assignees as string[];
+        }
         const updated = await client.pgrUpdate(service, action, {
           comment: data.comment as string | undefined,
-          assignees: data.assignees as string[] | undefined,
-          rating: data.rating as number | undefined,
+          assignees,
+          rating: data.rating != null ? Number(data.rating) : undefined,
         });
         const updatedService = ((updated as Record<string, unknown>).service || updated) as Record<string, unknown>;
         return { data: normalizeRecord(updatedService, config) };
@@ -475,6 +580,11 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
         results.push(id);
       }
       return { data: results };
+    },
+
+    async idgenGenerate(idName: string, format?: string): Promise<string> {
+      const results = await client.idgenGenerate(tenantId, [{ idName, format }]);
+      return results[0]?.id ?? '';
     },
   };
 

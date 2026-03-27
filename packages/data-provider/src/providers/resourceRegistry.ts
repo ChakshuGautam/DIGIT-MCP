@@ -1,7 +1,7 @@
 import { ENDPOINTS } from '../client/endpoints.js';
 import { MDMS_SCHEMAS } from '../client/types.js';
 
-export type ResourceType = 'mdms' | 'hrms' | 'boundary' | 'pgr' | 'localization' | 'user' | 'workflow-bs' | 'workflow-process' | 'access-role' | 'mdms-schema' | 'boundary-hierarchy';
+export type ResourceType = 'mdms' | 'hrms' | 'boundary' | 'pgr' | 'localization' | 'user' | 'workflow-bs' | 'workflow-process' | 'access-role' | 'access-action' | 'mdms-schema' | 'boundary-hierarchy';
 
 export interface ResourceConfig {
   type: ResourceType;
@@ -72,6 +72,10 @@ export const REGISTRY: Record<string, ResourceConfig> = {
     type: 'access-role', label: 'Access Roles', idField: 'code',
     nameField: 'name', descriptionField: 'description', dedicated: true,
   },
+  'access-actions': {
+    type: 'access-action', label: 'Access Actions', idField: 'id',
+    nameField: 'displayName', descriptionField: 'url', dedicated: true,
+  },
   'mdms-schemas': {
     type: 'mdms-schema', label: 'MDMS Schemas', idField: 'code',
     nameField: 'code', descriptionField: 'description', dedicated: true,
@@ -87,9 +91,9 @@ export const REGISTRY: Record<string, ResourceConfig> = {
   'city-modules': { type: 'mdms', label: 'City Modules', schema: 'tenant.citymodule', idField: 'code', nameField: 'module' },
   'id-formats': { type: 'mdms', label: 'ID Formats', schema: 'common-masters.IdFormat', idField: 'idname', nameField: 'idname' },
   'workflow-services': { type: 'mdms', label: 'Business Services', schema: 'Workflow.BusinessService', idField: 'businessService', nameField: 'business' },
-  'workflow-config': { type: 'mdms', label: 'Workflow Config', schema: 'Workflow.BusinessServiceConfig', idField: 'businessService', nameField: 'businessService' },
+  'workflow-config': { type: 'mdms', label: 'Workflow Config', schema: 'Workflow.BusinessServiceConfig', idField: 'code', nameField: 'code' },
   'auto-escalation': { type: 'mdms', label: 'Auto Escalation', schema: 'Workflow.AutoEscalation', idField: 'businessService', nameField: 'businessService' },
-  'sla-config': { type: 'mdms', label: 'SLA Config', schema: 'common-masters.wfSlaConfig', idField: 'businessService', nameField: 'businessService' },
+  'sla-config': { type: 'mdms', label: 'SLA Config', schema: 'common-masters.wfSlaConfig', idField: 'slotPercentage', nameField: 'slotPercentage' },
   'role-actions': { type: 'mdms', label: 'Role Actions', schema: 'ACCESSCONTROL-ROLEACTIONS.roleactions', idField: 'id', nameField: 'rolecode', descriptionField: 'actionid' },
   roles: { type: 'mdms', label: 'Roles', schema: MDMS_SCHEMAS.ROLES, idField: 'code', nameField: 'name', descriptionField: 'description' },
   'action-mappings': { type: 'mdms', label: 'Action Mappings', schema: 'ACCESSCONTROL-ACTIONS-TEST.actions-test', idField: 'id', nameField: 'displayName', descriptionField: 'url' },
@@ -106,7 +110,7 @@ export const REGISTRY: Record<string, ResourceConfig> = {
   'employee-status': { type: 'mdms', label: 'Employee Status', schema: MDMS_SCHEMAS.EMPLOYEE_STATUS, idField: 'code', nameField: 'code' },
   'employee-type': { type: 'mdms', label: 'Employee Type', schema: MDMS_SCHEMAS.EMPLOYEE_TYPE, idField: 'code', nameField: 'code' },
   'cron-jobs': { type: 'mdms', label: 'Cron Jobs', schema: 'common-masters.CronJobAPIConfig', idField: 'jobName', nameField: 'jobName' },
-  'ui-homepage': { type: 'mdms', label: 'UI Homepage', schema: 'common-masters.uiHomePage', idField: 'name', nameField: 'name' },
+  'ui-homepage': { type: 'mdms', label: 'UI Homepage', schema: 'common-masters.uiHomePage', idField: 'redirectURL', nameField: 'redirectURL' },
 };
 
 export function getResourceConfig(resource: string): ResourceConfig | undefined {
@@ -148,4 +152,11 @@ export function getResourceIdField(resource: string): string {
 export function getResourceLabel(resource: string): string {
   if (REGISTRY[resource]) return REGISTRY[resource].label;
   return resource.charAt(0).toUpperCase() + resource.slice(1);
+}
+
+export function getResourceBySchema(schemaCode: string): string | undefined {
+  for (const [name, config] of Object.entries(REGISTRY)) {
+    if (config.schema === schemaCode) return name;
+  }
+  return undefined;
 }
