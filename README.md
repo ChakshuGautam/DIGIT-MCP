@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ChakshuGautam/digit-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ChakshuGautam/digit-mcp/actions/workflows/ci.yml)
 
-MCP server that bridges AI agents to the [DIGIT](https://docs.digit.org) eGov platform — **60 tools** across **14 groups** covering tenant management, grievance redressal (PGR), employee management, workflow, observability, and more.
+MCP server + data provider for the [DIGIT](https://docs.digit.org) eGov platform — **60 MCP tools** across **14 groups**, a **shared TypeScript API client** (`@digit-mcp/data-provider`), and a **react-admin DataProvider/AuthProvider** for building DIGIT frontends.
 
 Only 11 tools load initially (`core` + `docs`). The rest unlock on demand via `enable_tools`, so agents aren't overwhelmed with options they don't need yet.
 
@@ -197,9 +197,19 @@ Full tool reference with per-tool docs: **[docs/api/](docs/api/README.md)**
 
 ## Common Workflows
 
+**Connect to any DIGIT instance by URL:**
+```
+configure(base_url="https://my-digit.example.com", username, password) → auto-probes services
+```
+
 **Set up a new city with PGR:**
 ```
 configure → tenant_bootstrap → city_setup → employee_create → pgr_create
+```
+
+**Set up a city from xlsx files (CCRS dataloader format):**
+```
+configure → city_setup_from_xlsx(tenant_id, masters_file, employee_file, ...)
 ```
 
 **File a complaint and resolve it:**
@@ -227,6 +237,88 @@ enable_tools(["tracing"]) → trace_debug → trace_get
 | [API Reference](docs/api/README.md) | All 60 tools with parameters and examples |
 | [OpenAPI Spec](docs/openapi.yaml) | Machine-readable API specification |
 
+## Data Provider (`@digit-mcp/data-provider`)
+
+Shared TypeScript package for building DIGIT frontends. Lives in `packages/data-provider/`.
+
+### Install
+
+```bash
+npm install @digit-mcp/data-provider
+```
+
+### API Client
+
+Standalone DIGIT API client with 45+ methods covering all platform services:
+
+```typescript
+import { DigitApiClient } from '@digit-mcp/data-provider/client';
+
+const client = new DigitApiClient({
+  url: 'https://my-digit-instance.example.com',
+  stateTenantId: 'pg',
+});
+
+await client.login('ADMIN', 'eGov@123', 'pg');
+
+// MDMS
+const departments = await client.mdmsSearch('pg', 'common-masters.Department');
+
+// PGR
+const complaints = await client.pgrSearch('pg.citya', { status: 'PENDINGASSIGNMENT' });
+
+// HRMS
+const employees = await client.employeeSearch('pg.citya', { limit: 100 });
+
+// Boundaries, workflow, localization, filestore, idgen, encryption, access control...
+```
+
+**Services covered:** User, MDMS v2, HRMS, Boundary (entities + hierarchy + management), PGR, Localization, Workflow, Access Control, IDGen, Filestore, Encryption, Inbox.
+
+Built-in retry logic (429/503 with exponential backoff), endpoint overrides, and multi-tenant resolution.
+
+### react-admin DataProvider
+
+Drop-in `DataProvider` and `AuthProvider` for [react-admin](https://marmelab.com/react-admin/):
+
+```typescript
+import { DigitApiClient } from '@digit-mcp/data-provider/client';
+import { createDigitDataProvider, createDigitAuthProvider } from '@digit-mcp/data-provider';
+
+const client = new DigitApiClient({ url: 'https://...', stateTenantId: 'pg' });
+const dataProvider = createDigitDataProvider(client, 'pg.citya');
+const authProvider = createDigitAuthProvider(client);
+
+// Use with react-admin <Admin>
+<Admin dataProvider={dataProvider} authProvider={authProvider}>
+  <Resource name="complaints" />
+  <Resource name="employees" />
+  <Resource name="departments" />
+</Admin>
+```
+
+**13 dedicated resources** out of the box: tenants, departments, designations, complaint-types, employees, boundaries, complaints, localization, users, workflow-business-services, workflow-processes, access-roles, access-actions.
+
+**17 generic MDMS resources** auto-mapped: state-info, branding, city-modules, id-formats, role-actions, and more.
+
+Smart features:
+- Auto-searches city sub-tenants when root tenant returns no results
+- Flattens boundary hierarchies into flat lists with parent pointers
+- Handles PGR workflow state transitions (ASSIGN, RESOLVE, REJECT, REOPEN, RATE)
+- MDMS `uniqueIdentifier` fast-path for getOne lookups
+
+### Resource Registry
+
+Query available resources programmatically:
+
+```typescript
+import { getAllResources, getDedicatedResources, getResourceBySchema } from '@digit-mcp/data-provider';
+
+getAllResources();           // all 30 resource configs
+getDedicatedResources();     // 13 first-class resources
+getResourceBySchema('RAINMAKER-PGR.ServiceDefs');  // → complaint-types config
+```
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -250,11 +342,18 @@ enable_tools(["tracing"]) → trace_debug → trace_get
 ## Testing
 
 ```bash
+# MCP server
 npm test                 # Quick validator tests
 npm run test:safety      # Agent safety tests (53 tests)
-npm run test:full        # Full integration suite (127 tests, 100% tool coverage)
+npm run test:full        # Full integration suite (130 tests, 100% tool coverage)
 npm run test:e2e         # E2E new-tenant test
 npm run test:openapi     # Validate OpenAPI spec against live APIs
+npx tsx test-xlsx-reader.ts  # xlsx-reader unit tests (12 tests)
+
+# Data provider
+cd packages/data-provider
+npm test                 # Unit tests (client, registry, providers)
+npm run test:integration # Integration tests against live DIGIT API
 ```
 
 ## Architecture
@@ -282,7 +381,22 @@ src/
 ├── utils/
 │   ├── validation.ts     # Input validation (tenant IDs, mobile, control chars)
 │   ├── sanitize.ts       # Response sanitization (prompt injection defense)
-│   └── field-mask.ts     # Field projection for search results
+│   ├── field-mask.ts     # Field projection for search results
+│   ├── probe.ts          # Service availability probing for ad-hoc environments
+│   ├── xlsx-reader.ts    # xlsx sheet parsing (CCRS dataloader format)
+│   └── xlsx-loader.ts    # 4-phase xlsx setup orchestrator
+packages/
+└── data-provider/        # @digit-mcp/data-provider
+    └── src/
+        ├── client/       # DigitApiClient — standalone DIGIT API client (45+ methods)
+        │   ├── DigitApiClient.ts
+        │   ├── endpoints.ts
+        │   ├── errors.ts
+        │   └── types.ts
+        └── providers/    # react-admin integration
+            ├── dataProvider.ts      # DataProvider (CRUD for 30 resources)
+            ├── authProvider.ts      # AuthProvider (OAuth2 session)
+            └── resourceRegistry.ts  # Resource config registry
 docs/
 ├── api/                  # Per-tool API reference
 ├── guides/               # 5 walkthrough guides
