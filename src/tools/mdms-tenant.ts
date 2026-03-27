@@ -406,7 +406,7 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
                 userName: auth.user.userName,
                 name: auth.user.name,
                 tenantId: auth.user.tenantId,
-                roles: auth.user.roles?.map((r) => r.code),
+                roles: auth.user.roles?.map((r: { code: string }) => r.code),
               }
             : null,
         },
