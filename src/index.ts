@@ -3,6 +3,8 @@ import { createServer } from './server.js';
 import { mcpLogger } from './logger.js';
 import { sessionStore } from './services/session-store.js';
 import { db } from './services/db.js';
+import { digitDb } from './services/digit-db.js';
+import { handlePgrDashboard } from './api/pgr-dashboard.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { join, extname, resolve } from 'node:path';
@@ -88,8 +90,9 @@ if (transportMode === 'stdio') {
     }
   }
 
-  // Initialize DB for API endpoints (best-effort, same as session-store)
+  // Initialize DBs for API endpoints (best-effort, graceful degradation)
   await db.initialize();
+  await digitDb.initialize();
 
   // --- HTTP server ---
 
@@ -101,6 +104,12 @@ if (transportMode === 'stdio') {
     if (req.method === 'GET' && pathname === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok', transport: 'http', timestamp: new Date().toISOString() }));
+      return;
+    }
+
+    // PGR Dashboard API
+    if (req.method === 'GET' && pathname === '/api/pgr/dashboard') {
+      await handlePgrDashboard(res, parseQuery(url));
       return;
     }
 
