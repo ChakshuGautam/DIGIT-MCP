@@ -382,7 +382,23 @@ export function createDigitDataProvider(client: DigitApiClient, tenantId: string
         return { data: normalizeMdmsRecord(record, config) };
       }
       if (config.type === 'hrms') {
-        const [employee] = await client.employeeCreate(tenantId, [params.data as Record<string, unknown>]);
+        const empData = { ...params.data as Record<string, unknown> };
+        // Enrich jurisdiction boundary with tenantId if empty
+        const jurisdictions = empData.jurisdictions as Array<Record<string, unknown>> | undefined;
+        if (jurisdictions?.[0] && !jurisdictions[0].boundary) {
+          jurisdictions[0].boundary = tenantId;
+        }
+        // Ensure role name is present (HRMS requires it)
+        const user = empData.user as Record<string, unknown> | undefined;
+        const roles = user?.roles as Array<Record<string, unknown>> | undefined;
+        if (roles) {
+          for (const role of roles) {
+            if (role.code && !role.name) {
+              role.name = String(role.code).charAt(0) + String(role.code).slice(1).toLowerCase();
+            }
+          }
+        }
+        const [employee] = await client.employeeCreate(tenantId, [empData]);
         return { data: normalizeRecord(employee, config) };
       }
       if (config.type === 'pgr') {
