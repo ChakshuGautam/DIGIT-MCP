@@ -101,3 +101,40 @@ async function testRegistry() {
 
 await testRegistry();
 console.log('✓ registry');
+
+import { mdmsSchemasSurface } from './src/dump/surfaces/mdmsSchemas.js';
+
+async function testMdmsSchemasSurface() {
+  const schemas = [
+    { code: 'common-masters.Department', tenantId: 'pwt.test', description: 'D', definition: {} },
+    { code: 'mcp-dumps.DumpRegistry',    tenantId: 'pwt.test', description: 'R', definition: {} },
+  ];
+  const client = {
+    async mdmsSchemaSearch() { return schemas; },
+    async mdmsSchemaCreate(_t: string, code: string) {
+      return { code };
+    },
+  } as never;
+
+  const lines: string[] = [];
+  for await (const line of mdmsSchemasSurface.dump(client, 'pwt.test', { tenantIds: ['pwt.test'], include: ['self'] })) {
+    lines.push(line);
+  }
+  // Excludes mcp-dumps.* prefix
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /common-masters\.Department/);
+
+  // Restore: skip-on-exists when schema is in existing list
+  async function* iter() { yield* lines; }
+  const existing = [{ code: 'common-masters.Department' }];
+  const skipClient = {
+    async mdmsSchemaSearch() { return existing; },
+    async mdmsSchemaCreate() { throw new Error('should not be called'); },
+  } as never;
+  const report = await mdmsSchemasSurface.restore(skipClient, iter(), 'pwt.test', { onConflict: 'skip', dryRun: false });
+  assert.equal(report.skipped, 1);
+  assert.equal(report.created, 0);
+}
+
+await testMdmsSchemasSurface();
+console.log('✓ surface: mdms-schemas');
