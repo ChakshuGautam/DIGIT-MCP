@@ -348,3 +348,49 @@ async function testBoundarySurface() {
 
 await testBoundarySurface();
 console.log('✓ surface: boundary');
+
+import { accessControlSurface } from './src/dump/surfaces/accessControl.js';
+
+async function testAccessControlSurface() {
+  const sourceRoles = [
+    { code: 'GRO',  name: 'Complaint Assessor', tenantId: 'pwt.test' },
+    { code: 'PGR_LME', name: 'Complaint Resolver', tenantId: 'pwt.test' },
+    { code: 'CITIZEN', name: 'Citizen', tenantId: 'pwt.test' },
+  ];
+  const targetExisting = [
+    { uniqueIdentifier: 'CITIZEN', data: { code: 'CITIZEN' } },  // exists at target
+  ];
+  const createCalls: unknown[] = [];
+
+  const client = {
+    async accessRolesSearch() { return sourceRoles; },
+  } as never;
+
+  const lines: string[] = [];
+  for await (const line of accessControlSurface.dump(client, 'pwt.test', { tenantIds: ['pwt.test'], include: ['self'] })) {
+    lines.push(line);
+  }
+  assert.equal(lines.length, 3, 'expected 3 role lines');
+
+  async function* iter() { yield* lines; }
+  const restoreClient = {
+    async mdmsV2SearchRaw() { return targetExisting; },
+    async mdmsV2Create(t: string, schema: string, uid: string, data: unknown) {
+      createCalls.push({ t, schema, uid, data });
+      return { id: 'x' };
+    },
+  } as never;
+
+  const report = await accessControlSurface.restore(restoreClient, iter(), 'pwt.test', { onConflict: 'skip', dryRun: false });
+  // CITIZEN exists at target → skipped. GRO + PGR_LME created.
+  assert.equal(report.created, 2);
+  assert.equal(report.skipped, 1);
+  assert.equal(createCalls.length, 2);
+  // Verify mdms_create was hit against the role schema
+  for (const c of createCalls) {
+    assert.equal((c as { schema: string }).schema, 'ACCESSCONTROL-ROLES.roles');
+  }
+}
+
+await testAccessControlSurface();
+console.log('✓ surface: access-control');
