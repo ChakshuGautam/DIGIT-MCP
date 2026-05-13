@@ -173,6 +173,18 @@ export async function dumpTenant(
   };
 }
 
+/**
+ * List all dumps for a tenant (or all tenants if undefined), sorted by version desc.
+ */
+export async function listDumps(client: EngineClient, tenantId?: string): Promise<RegistryRow[]> {
+  const rows = await listRegistryRows(client, tenantId);
+  return [...rows].sort((a, b) => {
+    const an = parseInt(a.version.replace(/\D/g, ''), 10) || 0;
+    const bn = parseInt(b.version.replace(/\D/g, ''), 10) || 0;
+    return bn - an;
+  });
+}
+
 interface RestoreArgs {
   tenant_id: string;                   // target
   version?: string;                    // 'latest' | 'v3'

@@ -557,3 +557,49 @@ async function testEngineRestore() {
 
 await testEngineRestore();
 console.log('✓ engine: restoreFromFilestore');
+
+import { listDumps } from './src/dump/engine.js';
+
+async function testEngineListDumps() {
+  const registryRows: Record<string, unknown>[] = [];
+  const client = {
+    async mdmsSchemaSearch(_t: string, codes?: string[]) {
+      if (codes?.includes('mcp-dumps.DumpRegistry')) {
+        return registryRows.length > 0 ? [{ code: 'mcp-dumps.DumpRegistry' }] : [];
+      }
+      return [];
+    },
+    async mdmsSchemaCreate(_t: string, code: string) { return { code }; },
+    async mdmsV2Create(_t: string, _s: string, _u: string, data: unknown) {
+      registryRows.push(data as Record<string, unknown>);
+      return { id: 'x' };
+    },
+    async mdmsV2SearchRaw(_t: string, schemaCode: string) {
+      if (schemaCode === 'mcp-dumps.DumpRegistry') return registryRows.map((d) => ({ data: d }));
+      return [];
+    },
+  } as never;
+
+  // Empty list
+  let dumps = await listDumps(client, 'pwt.test');
+  assert.equal(dumps.length, 0);
+
+  // Seed three rows
+  const { writeRegistryRow, ensureRegistrySchema } = await import('./src/dump/registry.js');
+  await ensureRegistrySchema(client, 'pwt');
+  for (const v of ['v1', 'v3', 'v2']) {
+    await writeRegistryRow(client, {
+      tenant_id: 'pwt.test', version: v, filestore_id: `fs-${v}`,
+      created_at: 'now', size_bytes: 100, sha256: 'a'.repeat(64),
+      surfaces: ['mdms-data'], include: ['self'],
+    });
+  }
+
+  dumps = await listDumps(client, 'pwt.test');
+  assert.equal(dumps.length, 3);
+  // Sorted by version desc: v3, v2, v1
+  assert.deepEqual(dumps.map((d) => d.version), ['v3', 'v2', 'v1']);
+}
+
+await testEngineListDumps();
+console.log('✓ engine: listDumps');
