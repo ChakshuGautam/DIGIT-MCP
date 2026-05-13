@@ -242,3 +242,57 @@ async function testLocalizationSurface() {
 
 await testLocalizationSurface();
 console.log('✓ surface: localization');
+
+import { workflowSurface } from './src/dump/surfaces/workflow.js';
+
+async function testWorkflowSurface() {
+  const sourceServices = [
+    { businessService: 'PGR', tenantId: 'pwt.test', states: [{ state: 'NEW' }], actions: ['APPLY'] },
+    { businessService: 'TL', tenantId: 'pwt.test', states: [{ state: 'INIT' }], actions: ['SUBMIT'] },
+  ];
+  const targetServices = [
+    { businessService: 'PGR', tenantId: 'pwt.test' },  // exists at target
+  ];
+  const createCalls: unknown[] = [];
+  const updateCalls: unknown[] = [];
+
+  const client = {
+    async workflowBusinessServiceSearch() { return sourceServices; },
+  } as never;
+
+  // Dump emits 2 JSONL lines
+  const lines: string[] = [];
+  for await (const line of workflowSurface.dump(client, 'pwt.test', { tenantIds: ['pwt.test'], include: ['self'] })) {
+    lines.push(line);
+  }
+  assert.equal(lines.length, 2);
+
+  // Restore under skip — TL created, PGR skipped
+  async function* iter() { yield* lines; }
+  const restoreClient = {
+    async workflowBusinessServiceSearch() { return targetServices; },
+    async workflowBusinessServiceCreate(t: string, svc: { businessService: string }) {
+      createCalls.push({ tenant: t, code: svc.businessService });
+      return svc;
+    },
+    async workflowBusinessServiceUpdate(t: string, svc: { businessService: string }) {
+      updateCalls.push({ tenant: t, code: svc.businessService });
+      return svc;
+    },
+  } as never;
+  const report = await workflowSurface.restore(restoreClient, iter(), 'pwt.test', { onConflict: 'skip', dryRun: false });
+  assert.equal(report.created, 1);
+  assert.equal(report.skipped, 1);
+  assert.equal(createCalls.length, 1);
+  assert.equal(updateCalls.length, 0);
+
+  // Restore under overwrite — TL created, PGR updated
+  async function* iter2() { yield* lines; }
+  const report2 = await workflowSurface.restore(restoreClient, iter2(), 'pwt.test', { onConflict: 'overwrite', dryRun: false });
+  assert.equal(report2.created, 1);
+  assert.equal(report2.updated, 1);
+  assert.equal(updateCalls.length, 1);
+}
+
+await testWorkflowSurface();
+console.log('✓ surface: workflow');
