@@ -22,6 +22,7 @@
 import assert from 'node:assert/strict';
 import { digitApi } from './src/services/digit-api.js';
 import { dumpTenant, restoreFromFilestore, listDumps } from './src/dump/engine.js';
+import type { ApplyReport } from './src/dump/types.js';
 
 const username = process.env.CRS_USERNAME || 'ADMIN';
 const password = process.env.CRS_PASSWORD || 'eGov@123';
@@ -62,7 +63,7 @@ async function main(): Promise<void> {
   //    sufficient for MDMS-level dump/restore. Persister/Kafka writes are
   //    async; if this returns a phantom 200 with no body, we continue.
   // ------------------------------------------------------------------
-  console.log('[1/8] Creating throwaway tenant entry in MDMS...');
+  console.log('[1/11] Creating throwaway tenant entry in MDMS...');
   try {
     await digitApi.mdmsV2Create(rootTenant, 'tenant.tenants', throwaway, {
       code: throwaway,
@@ -82,7 +83,7 @@ async function main(): Promise<void> {
   //    is the x-unique key, so MDMS stores `uniqueIdentifier` = uppercase code
   //    regardless of what we pass in.
   // ------------------------------------------------------------------
-  console.log('[2/8] Seeding sample MDMS records in throwaway tenant...');
+  console.log('[2/11] Seeding sample MDMS records in throwaway tenant...');
   const ts = Date.now();
   // MDMS persister is async — give Kafka a moment per create so the search
   // is consistent. We use code values that include the ts for uniqueness.
@@ -112,7 +113,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // 3. Dump
   // ------------------------------------------------------------------
-  console.log('[3/8] Dumping throwaway tenant (include=self,root)...');
+  console.log('[3/11] Dumping throwaway tenant (include=self,root)...');
   const dumpResult = await dumpTenant(digitApi as never, {
     tenant_id: throwaway,
     include: ['self', 'root'],
@@ -132,7 +133,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // 4. List dumps and confirm ours is there
   // ------------------------------------------------------------------
-  console.log('[4/8] Listing dumps...');
+  console.log('[4/11] Listing dumps...');
   const dumps = await listDumps(digitApi as never, throwaway);
   const myDump = dumps.find((d) => d.version === dumpResult.version);
   assert.ok(myDump, `dump ${dumpResult.version} should appear in list`);
@@ -145,7 +146,7 @@ async function main(): Promise<void> {
   //    touch the records we created so we don't disturb anything else
   //    the throwaway tenant inherited from root.
   // ------------------------------------------------------------------
-  console.log('[5/8] Soft-deleting seeded throwaway records...');
+  console.log('[5/11] Soft-deleting seeded throwaway records...');
   const toDelete = (await digitApi.mdmsV2SearchRaw(throwaway, 'common-masters.Department'))
     .filter((r) => seedCodes.includes(String(r.uniqueIdentifier)));
   for (const rec of toDelete) {
@@ -170,7 +171,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // 6. Restore from latest dump with overwrite
   // ------------------------------------------------------------------
-  console.log('[6/8] Restoring from latest dump (on_conflict=overwrite)...');
+  console.log('[6/11] Restoring from latest dump (on_conflict=overwrite)...');
   const report = await restoreFromFilestore(digitApi as never, {
     tenant_id: throwaway,
     version: 'latest',
@@ -191,7 +192,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // 7. Verify the seeded records came back active
   // ------------------------------------------------------------------
-  console.log('[7/8] Verifying seeded records re-applied...');
+  console.log('[7/11] Verifying seeded records re-applied...');
   // Wait for the restore-side updates to make their way through Kafka.
   await pollUntil(
     async () => {
@@ -212,10 +213,199 @@ async function main(): Promise<void> {
   );
 
   // ------------------------------------------------------------------
-  // 8. Done
+  // 8. Capture a sentinel record's lastModifiedTime. Used by step 9
+  //    (dry-run must not mutate) and step 10 (idempotent skip).
   // ------------------------------------------------------------------
-  console.log('[8/8] OK — round-trip complete.');
-  console.log(`\nThrowaway tenant ${throwaway} left in MDMS (cleanup out of scope).`);
+  console.log('[8/11] Capturing sentinel record state for dry-run comparison...');
+  const sentinelCode = seedCodes[0];
+  const sentinelBefore = (await digitApi.mdmsV2SearchRaw(throwaway, 'common-masters.Department'))
+    .find((r) => String(r.uniqueIdentifier) === sentinelCode);
+  assert.ok(sentinelBefore, `sentinel record ${sentinelCode} should exist after restore`);
+  const sentinelBeforeLMT = sentinelBefore!.auditDetails?.lastModifiedTime;
+  assert.ok(
+    typeof sentinelBeforeLMT === 'number' && sentinelBeforeLMT > 0,
+    'sentinel must carry an auditDetails.lastModifiedTime',
+  );
+  console.log(`  sentinel=${sentinelCode} lastModifiedTime=${sentinelBeforeLMT}`);
+
+  // ------------------------------------------------------------------
+  // 9. Dry-run restore (overwrite policy + dryRun=true). Counts must be
+  //    non-zero (the engine still planned all the writes) but the sentinel
+  //    record must not actually have been mutated.
+  // ------------------------------------------------------------------
+  console.log('[9/11] Restoring from latest dump (dry_run=true)...');
+  const dryReport: ApplyReport = await restoreFromFilestore(digitApi as never, {
+    tenant_id: throwaway,
+    version: 'latest',
+    on_conflict: 'overwrite',
+    dry_run: true,
+  });
+  console.log(`  dry-run ok=${dryReport.ok} partial=${dryReport.partial} totals=${JSON.stringify(dryReport.totals)}`);
+  for (const sr of dryReport.surfaces) {
+    if (sr.created || sr.updated || sr.skipped || sr.failed) {
+      console.log(`    surface ${sr.surface}: created=${sr.created} updated=${sr.updated} skipped=${sr.skipped} failed=${sr.failed}`);
+    }
+  }
+  assert.equal(dryReport.ok, true, `dry-run must succeed (error=${dryReport.error ?? '<none>'})`);
+  const dryCounted = dryReport.totals.created + dryReport.totals.updated + dryReport.totals.skipped;
+  assert.ok(dryCounted > 0, `dry-run must report non-zero planned counts (totals=${JSON.stringify(dryReport.totals)})`);
+  assert.equal(dryReport.totals.failed, 0, `dry-run must not record failures (got ${dryReport.totals.failed})`);
+
+  // Re-query sentinel and confirm lastModifiedTime is unchanged.
+  // Small wait window in case anything async DID slip out, so we don't get
+  // a false negative from a same-millisecond comparison.
+  await new Promise((r) => setTimeout(r, 2000));
+  const sentinelAfterDry = (await digitApi.mdmsV2SearchRaw(throwaway, 'common-masters.Department'))
+    .find((r) => String(r.uniqueIdentifier) === sentinelCode);
+  assert.ok(sentinelAfterDry, 'sentinel record must still exist after dry-run');
+  const sentinelAfterDryLMT = sentinelAfterDry!.auditDetails?.lastModifiedTime;
+  console.log(`  sentinel after dry-run lastModifiedTime=${sentinelAfterDryLMT} (was ${sentinelBeforeLMT})`);
+  assert.equal(
+    sentinelAfterDryLMT,
+    sentinelBeforeLMT,
+    `dry-run must not mutate sentinel (before=${sentinelBeforeLMT} after=${sentinelAfterDryLMT})`,
+  );
+
+  // ------------------------------------------------------------------
+  // 10. Skip restore. Everything from the v1 dump is already present and
+  //     active in the tenant, so every record should be skipped, nothing
+  //     should be created, and there should be no failures. Re-run once
+  //     to confirm idempotency.
+  // ------------------------------------------------------------------
+  console.log('[10/11] Restoring from latest dump (on_conflict=skip)...');
+  const skipReport: ApplyReport = await restoreFromFilestore(digitApi as never, {
+    tenant_id: throwaway,
+    version: 'latest',
+    on_conflict: 'skip',
+    dry_run: false,
+  });
+  console.log(`  skip ok=${skipReport.ok} partial=${skipReport.partial} totals=${JSON.stringify(skipReport.totals)}`);
+  for (const sr of skipReport.surfaces) {
+    if (sr.created || sr.updated || sr.skipped || sr.failed) {
+      console.log(`    surface ${sr.surface}: created=${sr.created} updated=${sr.updated} skipped=${sr.skipped} failed=${sr.failed}`);
+    }
+  }
+  assert.equal(skipReport.ok, true, `skip restore must succeed (error=${skipReport.error ?? '<none>'})`);
+  assert.ok(
+    skipReport.totals.skipped > 0,
+    `skip restore must report at least one skipped record (totals=${JSON.stringify(skipReport.totals)})`,
+  );
+  // Specifically, our seeded common-masters.Department records should appear
+  // in the skipped bucket (not failed) — they're already present and active.
+  const mdmsDataSkip = skipReport.surfaces.find((s) => s.surface === 'mdms-data');
+  assert.ok(mdmsDataSkip, 'skip report must include mdms-data surface');
+  assert.ok(
+    mdmsDataSkip!.skipped > 0,
+    `mdms-data must report skipped > 0 under skip policy (got ${JSON.stringify(mdmsDataSkip)})`,
+  );
+  // The seeded records (common-masters.Department) must not be in the failure
+  // list — they're well-formed and already present.
+  const seededFailures = mdmsDataSkip!.errors.filter((e) =>
+    seedCodes.some((c) => String(e.identifier).includes(c)),
+  );
+  assert.equal(
+    seededFailures.length,
+    0,
+    `seeded records must NOT appear in skip-restore failure list (got ${JSON.stringify(seededFailures)})`,
+  );
+
+  // Idempotency: run skip again. We can't strictly equate totals between
+  // runs — localization writes always create (no skip), and Kafka persister
+  // lag shifts the mdms-data skipped/failed split between runs. What MUST
+  // hold for our seeded records (which the dump definitively contains) is:
+  //   - never reported as failures
+  //   - never reported as updates (skip policy must not touch existing)
+  console.log('  re-running skip restore to verify idempotency (for seeded records)...');
+  const skipReport2: ApplyReport = await restoreFromFilestore(digitApi as never, {
+    tenant_id: throwaway,
+    version: 'latest',
+    on_conflict: 'skip',
+    dry_run: false,
+  });
+  console.log(`  skip-2 ok=${skipReport2.ok} totals=${JSON.stringify(skipReport2.totals)}`);
+  assert.equal(skipReport2.ok, true, `second skip restore must succeed (error=${skipReport2.error ?? '<none>'})`);
+  // Updated must always be 0 under skip policy — by definition skip does not
+  // touch records that already exist.
+  assert.equal(
+    skipReport2.totals.updated,
+    0,
+    `skip policy must never update (run2 updated=${skipReport2.totals.updated})`,
+  );
+  // For our seeded common-masters.Department records: they must not appear
+  // in the failure list on either run.
+  const mdmsDataSkip2 = skipReport2.surfaces.find((s) => s.surface === 'mdms-data');
+  assert.ok(mdmsDataSkip2, 'skip-2 report must include mdms-data surface');
+  const seededFailures2 = mdmsDataSkip2!.errors.filter((e) =>
+    seedCodes.some((c) => String(e.identifier).includes(c)),
+  );
+  assert.equal(
+    seededFailures2.length,
+    0,
+    `seeded records must NOT appear in second skip-restore failure list (got ${JSON.stringify(seededFailures2)})`,
+  );
+
+  // The sentinel record should still be unchanged after two skip passes:
+  // skip policy must not have rewritten it (and overwrite from step 6
+  // already happened, so its lastModifiedTime should be stable from there).
+  const sentinelAfterSkip = (await digitApi.mdmsV2SearchRaw(throwaway, 'common-masters.Department'))
+    .find((r) => String(r.uniqueIdentifier) === sentinelCode);
+  assert.ok(sentinelAfterSkip, 'sentinel must still exist after skip restores');
+  console.log(`  sentinel after skip restores lastModifiedTime=${sentinelAfterSkip!.auditDetails?.lastModifiedTime} (was ${sentinelBeforeLMT})`);
+  assert.equal(
+    sentinelAfterSkip!.auditDetails?.lastModifiedTime,
+    sentinelBeforeLMT,
+    `skip restore must not mutate sentinel (before=${sentinelBeforeLMT} after=${sentinelAfterSkip!.auditDetails?.lastModifiedTime})`,
+  );
+
+  // ------------------------------------------------------------------
+  // 11. Cross-root negative — restoring a `pg.*` dump into `ke.nairobi`
+  //     must be rejected with cross_root_restore_not_supported. Engine
+  //     should not even attempt to apply any surface.
+  //
+  //     Note: DIGIT filestore rejects downloads when the tenantId in the
+  //     query doesn't match the tenant the file was uploaded under (HTTP
+  //     400). That gives us a second layer of defense — the cross-root
+  //     attempt is blocked at the filestore layer before the engine even
+  //     gets to its own guard. We wrap the call and accept EITHER form of
+  //     rejection: the engine's cross_root guard returning ok:false, OR
+  //     filestore throwing a 400. Both prove cross-root data is
+  //     unreachable at the integration level.
+  // ------------------------------------------------------------------
+  console.log('[11/11] Cross-root restore attempt (target=ke.nairobi)...');
+  let crossReport: ApplyReport | null = null;
+  let crossThrew: Error | null = null;
+  try {
+    crossReport = await restoreFromFilestore(digitApi as never, {
+      tenant_id: 'ke.nairobi',
+      filestore_id: dumpResult.filestore_id,
+      on_conflict: 'skip',
+      dry_run: false,
+    });
+  } catch (err) {
+    crossThrew = err instanceof Error ? err : new Error(String(err));
+  }
+  if (crossReport) {
+    console.log(`  cross-root ok=${crossReport.ok} error=${crossReport.error}`);
+    assert.equal(crossReport.ok, false, 'cross-root restore must be rejected (ok=false)');
+    assert.ok(
+      typeof crossReport.error === 'string' && /cross_root_restore_not_supported/.test(crossReport.error),
+      `cross-root error must match /cross_root_restore_not_supported/ (got ${crossReport.error})`,
+    );
+    assert.equal(
+      crossReport.surfaces.length,
+      0,
+      `cross-root restore must abort before applying any surface (got ${crossReport.surfaces.length} surface reports)`,
+    );
+  } else {
+    console.log(`  cross-root threw at filestore layer: ${crossThrew!.message}`);
+    assert.ok(
+      /filestore_download_failed/.test(crossThrew!.message),
+      `cross-root must be rejected by filestore (got: ${crossThrew!.message})`,
+    );
+  }
+
+  console.log('\nOK — 11/11 steps complete (round-trip + conflict matrix + cross-root negative).');
+  console.log(`Throwaway tenant ${throwaway} left in MDMS (cleanup out of scope).`);
 }
 
 main().catch((err: unknown) => {
