@@ -6,6 +6,17 @@ interface Client {
   mdmsSchemaSearch(tenantId: string, codes?: string[]): Promise<Record<string, unknown>[]>;
   mdmsV2SearchRaw(tenantId: string, schemaCode: string, options?: { limit?: number; offset?: number }): Promise<Record<string, unknown>[]>;
   mdmsV2Create(tenantId: string, schemaCode: string, uniqueIdentifier: string, data: unknown): Promise<unknown>;
+  mdmsV2Update(
+    record: {
+      id: string;
+      tenantId: string;
+      schemaCode: string;
+      uniqueIdentifier: string;
+      data: Record<string, unknown>;
+      auditDetails?: unknown;
+    },
+    isActive: boolean,
+  ): Promise<unknown>;
 }
 
 export const mdmsDataSurface = {
@@ -39,22 +50,31 @@ export const mdmsDataSurface = {
       surface: 'mdms-data',
       created: 0, updated: 0, skipped: 0, failed: 0, errors: [],
     };
-    const existsCache = new Map<string, Set<string>>();
+    // Cache per schemaCode: uniqueIdentifier -> full live record. We need the
+    // full record (not just the uid) so the overwrite path can call
+    // mdmsV2Update with id/auditDetails/etc.
+    const existsCache = new Map<string, Map<string, Record<string, unknown>>>();
 
-    async function exists(schemaCode: string, uid: string): Promise<boolean> {
-      let set = existsCache.get(schemaCode);
-      if (!set) {
+    async function loadCache(schemaCode: string): Promise<Map<string, Record<string, unknown>>> {
+      let m = existsCache.get(schemaCode);
+      if (!m) {
         const rows = await client.mdmsV2SearchRaw(target, schemaCode);
-        set = new Set(rows.map((r) => String(r.uniqueIdentifier ?? '')));
-        existsCache.set(schemaCode, set);
+        m = new Map(rows.map((r) => [String(r.uniqueIdentifier ?? ''), r] as const));
+        existsCache.set(schemaCode, m);
       }
-      return set.has(uid);
+      return m;
+    }
+
+    async function findExisting(schemaCode: string, uid: string): Promise<Record<string, unknown> | undefined> {
+      const m = await loadCache(schemaCode);
+      return m.get(uid);
     }
 
     for await (const line of lines) {
       const row = JSON.parse(line) as { schemaCode: string; uniqueIdentifier: string; data: unknown };
       const uid = String(row.uniqueIdentifier);
-      const present = await exists(row.schemaCode, uid);
+      const liveRecord = await findExisting(row.schemaCode, uid);
+      const present = liveRecord !== undefined;
 
       if (present) {
         if (opts.onConflict === 'skip')     { report.skipped++; continue; }
@@ -67,9 +87,35 @@ export const mdmsDataSurface = {
       }
 
       try {
-        await client.mdmsV2Create(target, row.schemaCode, uid, row.data);
-        if (present) report.updated++; else report.created++;
-        existsCache.get(row.schemaCode)!.add(uid);
+        if (present) {
+          // DIGIT MDMS v2 has a "phantom 200" gotcha: a duplicate create
+          // returns 200 with an empty mdms[] array but does NOT update the
+          // existing record. We must call mdmsV2Update for the overwrite
+          // path with the full live record + isActive=true (so soft-deleted
+          // records get re-activated).
+          await client.mdmsV2Update(
+            {
+              ...(liveRecord as Record<string, unknown>),
+              data: row.data as Record<string, unknown>,
+            } as never,
+            true,
+          );
+          report.updated++;
+          // Refresh cache entry with the latest data + isActive=true.
+          const cached = existsCache.get(row.schemaCode)!;
+          cached.set(uid, { ...(liveRecord as Record<string, unknown>), data: row.data, isActive: true });
+        } else {
+          const created = await client.mdmsV2Create(target, row.schemaCode, uid, row.data);
+          report.created++;
+          // Add to cache so subsequent rows in the same restore don't re-create.
+          const cached = existsCache.get(row.schemaCode);
+          if (cached) {
+            const createdRec = (created && typeof created === 'object')
+              ? (created as Record<string, unknown>)
+              : { tenantId: target, schemaCode: row.schemaCode, uniqueIdentifier: uid, data: row.data, isActive: true };
+            cached.set(uid, createdRec);
+          }
+        }
       } catch (err) {
         report.failed++;
         report.errors.push({ identifier: `${row.schemaCode}/${uid}`, message: err instanceof Error ? err.message : String(err) });

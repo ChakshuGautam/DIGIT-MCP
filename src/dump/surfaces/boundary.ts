@@ -35,13 +35,43 @@ function flattenRels(nodes: RelNode[], hierarchyType: string): Array<{ code: str
   return out;
 }
 
+// DIGIT boundary-service raises this error when a tenant has no hierarchy
+// definition yet. Treat it as "empty" rather than an abort.
+const HIERARCHY_MISSING_TOKEN = 'HIERARCHY_DEFINITION_DOES_NOT_EXIST_ERR';
+function isMissingHierarchyError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes(HIERARCHY_MISSING_TOKEN);
+}
+
 export const boundarySurface = {
   name: 'boundary' as const,
 
   async *dump(client: Client, tenantId: string, _opts: DumpOpts): AsyncIterable<string> {
+    // Cheapest probe: hierarchy definitions. If the tenant has none, both
+    // boundarySearch() and boundaryRelationshipTreeSearch() are guaranteed to
+    // either return empty or throw HIERARCHY_DEFINITION_DOES_NOT_EXIST_ERR.
+    // Either way there's nothing to dump — emit a single empty document and bail.
     const hierarchies = await client.boundaryHierarchySearch(tenantId);
-    const entities = await client.boundarySearch(tenantId);
-    const relTree = await client.boundaryRelationshipTreeSearch(tenantId);
+    if (hierarchies.length === 0) {
+      yield JSON.stringify({ hierarchies: [], entities: [], relationships: [] });
+      return;
+    }
+    // Hierarchy defined but entities/relationships may still be empty or the
+    // boundary-service may yet error on them — be defensive.
+    let entities: Record<string, unknown>[] = [];
+    try {
+      entities = await client.boundarySearch(tenantId);
+    } catch (err) {
+      if (!isMissingHierarchyError(err)) throw err;
+      entities = [];
+    }
+    let relTree: Record<string, unknown>[] = [];
+    try {
+      relTree = await client.boundaryRelationshipTreeSearch(tenantId);
+    } catch (err) {
+      if (!isMissingHierarchyError(err)) throw err;
+      relTree = [];
+    }
     yield JSON.stringify({ hierarchies, entities, relationships: relTree });
   },
 
@@ -61,15 +91,34 @@ export const boundarySurface = {
     }
     if (!doc) return report;
 
-    // Existing state at target
-    const existingHierarchies = new Set(
-      (await client.boundaryHierarchySearch(target)).map((h) => String(h.hierarchyType)),
-    );
-    const existingEntities = new Set(
-      (await client.boundarySearch(target)).map((b) => String(b.code)),
-    );
-    const existingRelTree = await client.boundaryRelationshipTreeSearch(target);
-    const existingRels = new Set(flattenRels(existingRelTree as unknown as RelNode[], '').map((r) => r.code));
+    // Existing state at target — guard each call for the empty-hierarchy case.
+    // When the target tenant has no hierarchy definition yet, boundarySearch
+    // and boundaryRelationshipTreeSearch throw HIERARCHY_DEFINITION_DOES_NOT_EXIST_ERR.
+    // That's fine — the existence sets are empty and we proceed with creates.
+    let existingHierarchies = new Set<string>();
+    let existingEntities = new Set<string>();
+    let existingRels = new Set<string>();
+
+    try {
+      const hs = await client.boundaryHierarchySearch(target);
+      existingHierarchies = new Set(hs.map((h) => String(h.hierarchyType)));
+    } catch (err) {
+      if (!isMissingHierarchyError(err)) throw err;
+    }
+
+    if (existingHierarchies.size > 0) {
+      try {
+        existingEntities = new Set((await client.boundarySearch(target)).map((b) => String(b.code)));
+      } catch (err) {
+        if (!isMissingHierarchyError(err)) throw err;
+      }
+      try {
+        const tree = await client.boundaryRelationshipTreeSearch(target);
+        existingRels = new Set(flattenRels(tree as unknown as RelNode[], '').map((r) => r.code));
+      } catch (err) {
+        if (!isMissingHierarchyError(err)) throw err;
+      }
+    }
 
     // Stage 1: hierarchies
     for (const h of doc.hierarchies) {

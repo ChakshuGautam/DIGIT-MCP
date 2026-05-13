@@ -6,6 +6,8 @@ const REGISTRY_DEFINITION = {
   type: 'object',
   title: 'MCP Dump Registry',
   required: ['tenant_id', 'version', 'filestore_id', 'created_at', 'size_bytes', 'sha256', 'surfaces', 'include'],
+  'x-unique': ['tenant_id', 'version'],
+  additionalProperties: false,
   properties: {
     tenant_id: { type: 'string' },
     version: { type: 'string', pattern: '^v[0-9]+$' },

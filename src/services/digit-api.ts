@@ -771,19 +771,26 @@ class DigitApiClient {
   }
 
   /**
-   * Download the raw bytes of a filestore entry by ID. Two-step internally:
-   * first fetches the signed URL via `/filestore/v1/files/url`, then GETs that URL.
+   * Download the raw bytes of a filestore entry by ID. Uses the gateway-side
+   * `/filestore/v1/files/id` endpoint which returns the bytes directly,
+   * sidestepping the signed-URL minio host resolution problem in compose stacks
+   * (the signed URL points to the internal `minio:9000` hostname which is not
+   * resolvable from outside the docker network).
    */
   async filestoreDownload(
     tenantId: string,
     fileStoreId: string,
   ): Promise<Buffer> {
-    const urls = await this.filestoreGetUrl(tenantId, [fileStoreId]);
-    const entry = urls[0] as Record<string, unknown> | undefined;
-    const url = entry?.url as string | undefined;
-    if (!url) throw new Error(`filestore_url_not_found: ${fileStoreId}`);
+    const params = new URLSearchParams({ tenantId, fileStoreId });
+    // FILESTORE_URL is /filestore/v1/files/url; swap the trailing /url for /id
+    // to hit the gateway-routed bytes endpoint.
+    const downloadPath = this.endpoint('FILESTORE_URL').replace(/\/url$/, '/id');
+    const url = `${this.environment.url}${downloadPath}?${params.toString()}`;
 
-    const response = await fetch(url);
+    const headers: Record<string, string> = {};
+    if (this.authToken) headers['Authorization'] = `Bearer ${this.authToken}`;
+
+    const response = await fetch(url, { method: 'GET', headers });
     if (!response.ok) {
       throw new Error(`filestore_download_failed: ${response.status} for ${fileStoreId}`);
     }

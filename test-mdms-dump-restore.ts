@@ -603,3 +603,132 @@ async function testEngineListDumps() {
 
 await testEngineListDumps();
 console.log('✓ engine: listDumps');
+
+import { REGISTRY_SCHEMA_CODE as _RSC } from './src/dump/registry.js';
+
+async function testRegistryDefinitionShape() {
+  // Inspect the schema definition that ensureRegistrySchema passes to MDMS.
+  // We use a stub to capture it, then assert structural requirements.
+  let captured: Record<string, unknown> | undefined;
+  const client = {
+    async mdmsSchemaSearch() { return []; },
+    async mdmsSchemaCreate(_t: string, _code: string, _desc: string, def: Record<string, unknown>) {
+      captured = def;
+      return { code: _code };
+    },
+  } as never;
+  const { ensureRegistrySchema } = await import('./src/dump/registry.js');
+  await ensureRegistrySchema(client, 'pwt');
+  assert.ok(captured, 'schema definition should be captured');
+  // The critical DIGIT MDMS v2 requirements:
+  assert.ok(Array.isArray((captured as Record<string, unknown>)['x-unique']), 'must declare x-unique as an array');
+  const xunique = (captured as Record<string, unknown>)['x-unique'] as string[];
+  assert.ok(xunique.includes('tenant_id'), 'x-unique should include tenant_id');
+  assert.ok(xunique.includes('version'), 'x-unique should include version');
+}
+
+await testRegistryDefinitionShape();
+console.log('✓ registry: schema shape (x-unique required)');
+
+async function testBoundarySurfaceEmpty() {
+  // Tenant with NO hierarchy → dump should not call relationship-tree at all.
+  let relCalled = false;
+  let entitiesCalled = false;
+  const client = {
+    async boundaryHierarchySearch() { return []; },
+    async boundarySearch() { entitiesCalled = true; return []; },
+    async boundaryRelationshipTreeSearch() { relCalled = true; throw new Error('should not be called'); },
+  } as never;
+
+  const lines: string[] = [];
+  for await (const line of boundarySurface.dump(client, 'pwt.test', { tenantIds: ['pwt.test'], include: ['self'] })) {
+    lines.push(line);
+  }
+  assert.equal(lines.length, 1, 'should still emit one empty document');
+  const doc = JSON.parse(lines[0]);
+  assert.equal(doc.hierarchies.length, 0);
+  assert.equal(doc.entities.length, 0);
+  assert.equal(doc.relationships.length, 0);
+  assert.equal(relCalled, false, 'relationship-tree must not be called when no hierarchy exists');
+  // Whether entities are queried is a judgment call — current contract: skip them too when no hierarchy
+  // (since boundary entities require a hierarchy). Lenient assertion:
+  // (no requirement on entitiesCalled — implementation choice)
+  void entitiesCalled;
+}
+
+await testBoundarySurfaceEmpty();
+console.log('✓ surface: boundary (empty-hierarchy fast path)');
+
+async function testBoundarySurfaceRestoreEmptyTarget() {
+  // Source dump has a hierarchy and 1 entity. Target is empty (would 400 on
+  // entity/rel searches). Restore should proceed and create everything.
+  const sourceDoc = {
+    hierarchies: [{ hierarchyType: 'ADMIN', boundaryHierarchy: [{ boundaryType: 'State', parentBoundaryType: null }] }],
+    entities: [{ code: 'pwt.test', tenantId: 'pwt.test', hierarchyType: 'ADMIN', boundaryType: 'State' }],
+    relationships: [{ code: 'pwt.test', parent: null }],
+  };
+  const dumpLine = JSON.stringify(sourceDoc);
+
+  const creates = { hierarchies: 0, entities: 0, rels: 0 };
+  const client = {
+    async boundaryHierarchySearch() { throw Object.assign(new Error('Hierarchy definition does not exist: HIERARCHY_DEFINITION_DOES_NOT_EXIST_ERR'), { errors: [{ code: 'HIERARCHY_DEFINITION_DOES_NOT_EXIST_ERR' }] }); },
+    async boundarySearch() { throw Object.assign(new Error('Hierarchy definition does not exist: HIERARCHY_DEFINITION_DOES_NOT_EXIST_ERR'), { errors: [{ code: 'HIERARCHY_DEFINITION_DOES_NOT_EXIST_ERR' }] }); },
+    async boundaryRelationshipTreeSearch() { throw Object.assign(new Error('Hierarchy definition does not exist: HIERARCHY_DEFINITION_DOES_NOT_EXIST_ERR'), { errors: [{ code: 'HIERARCHY_DEFINITION_DOES_NOT_EXIST_ERR' }] }); },
+    async boundaryHierarchyCreate(_t: string, ht: string) { creates.hierarchies++; return { hierarchyType: ht }; },
+    async boundaryCreate(_t: string, bs: unknown[]) { creates.entities += bs.length; return bs; },
+    async boundaryRelationshipCreate() { creates.rels++; return {}; },
+  } as never;
+
+  async function* iter() { yield dumpLine; }
+  const report = await boundarySurface.restore(client, iter(), 'pwt.test', { onConflict: 'skip', dryRun: false });
+  // The empty-target restore should NOT abort. It should create the hierarchy
+  // (and let downstream code handle the entity/relationship creation).
+  assert.ok(report.created >= 1, `expected hierarchy created, got created=${report.created}`);
+  assert.equal(creates.hierarchies, 1);
+}
+
+await testBoundarySurfaceRestoreEmptyTarget();
+console.log('✓ surface: boundary (restore against empty target)');
+
+async function testMdmsDataOverwriteUsesUpdate() {
+  // Existing inactive record at target; dump has the matching record;
+  // restore with on_conflict=overwrite must call mdmsV2Update (not Create).
+  const targetExisting = [{
+    id: 'existing-uuid',
+    tenantId: 'pwt.test',
+    schemaCode: 'common-masters.Department',
+    uniqueIdentifier: 'd1',
+    data: { code: 'D1', name: 'Original' },
+    auditDetails: { createdBy: 'x' },
+    isActive: false,
+  }];
+  const updateCalls: unknown[] = [];
+  const createCalls: unknown[] = [];
+
+  const client = {
+    async mdmsV2SearchRaw() { return targetExisting; },
+    async mdmsV2Create(...args: unknown[]) { createCalls.push(args); return { id: 'new' }; },
+    async mdmsV2Update(record: { id: string; uniqueIdentifier: string }, isActive: boolean) {
+      updateCalls.push({ id: record.id, uid: record.uniqueIdentifier, isActive });
+      return record;
+    },
+  } as never;
+
+  const dumpRow = JSON.stringify({
+    tenantId: 'pwt.test',
+    schemaCode: 'common-masters.Department',
+    uniqueIdentifier: 'd1',
+    data: { code: 'D1', name: 'Updated' },
+  });
+
+  async function* iter() { yield dumpRow; }
+  const report = await mdmsDataSurface.restore(client, iter(), 'pwt.test', { onConflict: 'overwrite', dryRun: false });
+  assert.equal(report.updated, 1);
+  assert.equal(createCalls.length, 0, 'must NOT call create when overwriting an existing record');
+  assert.equal(updateCalls.length, 1);
+  assert.equal((updateCalls[0] as { id: string }).id, 'existing-uuid');
+  assert.equal((updateCalls[0] as { isActive: boolean }).isActive, true, 'overwrite should re-activate soft-deleted records');
+}
+
+await testMdmsDataOverwriteUsesUpdate();
+console.log('✓ surface: mdms-data (overwrite uses Update not Create)');
