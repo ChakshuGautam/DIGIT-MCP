@@ -5,9 +5,9 @@ export type { ErrorCategory, RequestInfo, UserInfo, Role, MdmsRecord, ApiError, 
 // MCP-specific types
 
 // Tool groups for progressive disclosure
-export type ToolGroup = 'core' | 'mdms' | 'boundary' | 'masters' | 'employees' | 'localization' | 'pgr' | 'admin' | 'idgen' | 'location' | 'encryption' | 'docs' | 'monitoring' | 'tracing';
+export type ToolGroup = 'core' | 'mdms' | 'boundary' | 'masters' | 'employees' | 'localization' | 'pgr' | 'admin' | 'idgen' | 'location' | 'encryption' | 'docs' | 'monitoring' | 'tracing' | 'dumps';
 
-export const ALL_GROUPS: ToolGroup[] = ['core', 'mdms', 'boundary', 'masters', 'employees', 'localization', 'pgr', 'admin', 'idgen', 'location', 'encryption', 'docs', 'monitoring', 'tracing'];
+export const ALL_GROUPS: ToolGroup[] = ['core', 'mdms', 'boundary', 'masters', 'employees', 'localization', 'pgr', 'admin', 'idgen', 'location', 'encryption', 'docs', 'monitoring', 'tracing', 'dumps'];
 
 // Tool metadata stored in the registry
 export interface ToolMetadata {
