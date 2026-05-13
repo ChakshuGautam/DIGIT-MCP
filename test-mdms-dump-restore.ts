@@ -394,3 +394,67 @@ async function testAccessControlSurface() {
 
 await testAccessControlSurface();
 console.log('✓ surface: access-control');
+
+import { dumpTenant } from './src/dump/engine.js';
+import type { SurfaceName } from './src/dump/types.js';
+
+async function testEngineDumpTenant() {
+  // Mock client with minimum surface to satisfy all six surface dumpers + registry.
+  // Each surface returns an empty result so we exercise orchestration, not data movement.
+  const filestoreUploads: unknown[] = [];
+  const registryWrites: unknown[] = [];
+
+  const client = {
+    // Registry needs schema search + create
+    async mdmsSchemaSearch(_t: string, codes?: string[]) {
+      if (codes?.includes('mcp-dumps.DumpRegistry')) return [];   // first dump: registry schema doesn't exist
+      return [];                                                  // surfaces: empty schemas to dump
+    },
+    async mdmsSchemaCreate(_t: string, code: string) { return { code }; },
+    async mdmsV2Create(_t: string, schemaCode: string, uid: string, data: unknown) {
+      if (schemaCode === 'mcp-dumps.DumpRegistry') registryWrites.push({ uid, data });
+      return { id: 'x' };
+    },
+    async mdmsV2SearchRaw(_t: string, schemaCode: string) {
+      if (schemaCode === 'mcp-dumps.DumpRegistry') return registryWrites.map((w) => ({ data: (w as { data: unknown }).data }));
+      return [];
+    },
+
+    // Surfaces — all return empty
+    async localizationSearch() { return []; },
+    async workflowBusinessServiceSearch() { return []; },
+    async boundaryHierarchySearch() { return []; },
+    async boundarySearch() { return []; },
+    async boundaryRelationshipTreeSearch() { return []; },
+    async accessRolesSearch() { return []; },
+
+    // Filestore
+    async filestoreUpload(tenantId: string, module: string, buf: Buffer, fileName: string, contentType: string) {
+      filestoreUploads.push({ tenantId, module, size: buf.length, fileName, contentType });
+      return [{ fileStoreId: `fs-${filestoreUploads.length}`, tenantId }];
+    },
+
+    // Auth/env info
+    getAuthInfo() { return { user: { userName: 'ADMIN' }, authenticated: true, stateTenantId: 'pwt', token: 'tok' }; },
+    getEnvironmentInfo() { return { name: 'unit-test', url: 'http://test', stateTenantId: 'pwt' }; },
+  } as never;
+
+  const result = await dumpTenant(client, {
+    tenant_id: 'pwt.test',
+    include: ['self', 'root'],
+  });
+
+  assert.equal(result.version, 'v1');
+  assert.ok(result.filestore_id.startsWith('fs-'));
+  assert.equal(result.sha256.length, 64);
+  assert.ok(result.size_bytes > 0);
+  assert.equal(filestoreUploads.length, 1);
+  assert.equal(registryWrites.length, 1);
+
+  // Second dump should produce v2
+  const result2 = await dumpTenant(client, { tenant_id: 'pwt.test', include: ['self'] });
+  assert.equal(result2.version, 'v2');
+}
+
+await testEngineDumpTenant();
+console.log('✓ engine: dumpTenant');
