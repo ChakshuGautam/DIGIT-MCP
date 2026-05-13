@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import JSZip from 'jszip';
 import { createDumpZip, readDumpZip } from './src/dump/zip.js';
 import type { Manifest } from './src/dump/types.js';
 
@@ -28,6 +29,18 @@ async function testZipRoundTrip() {
   assert.equal(out.manifest.sha256.length, 64, 'sha256 should be 64 hex chars');
   assert.deepEqual(Array.from(out.entries.keys()).sort(), ['mdms-data.jsonl', 'mdms-schemas.jsonl']);
   assert.equal(out.entries.get('mdms-schemas.jsonl')!.length, 2);
+
+  // negative: tampering with an entry body must fail verification
+  const tamperZip = await JSZip.loadAsync(buf);
+  tamperZip.file('mdms-schemas.jsonl', '{"tampered":true}');
+  const corrupted = await tamperZip.generateAsync({ type: 'nodebuffer' });
+  await assert.rejects(readDumpZip(corrupted), /manifest_checksum_mismatch/, 'tampered zip must fail integrity check');
+
+  // negative: zip without manifest.json must fail
+  const noManifest = new JSZip();
+  noManifest.file('mdms-data.jsonl', '{}');
+  const noManifestBuf = await noManifest.generateAsync({ type: 'nodebuffer' });
+  await assert.rejects(readDumpZip(noManifestBuf), /missing manifest/i, 'zip without manifest must fail');
 }
 
 await testZipRoundTrip();

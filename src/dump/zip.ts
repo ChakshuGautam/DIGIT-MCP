@@ -10,6 +10,12 @@ const MANIFEST_FILE = 'manifest.json';
  * The sha256 in the manifest is computed over the concatenated entry bodies
  * in sorted-by-key order, then written into the manifest before the zip is
  * finalized.
+ *
+ * `entries` values are arrays of non-empty strings (typically jsonl rows).
+ * Each row is joined with `\n` on write and split back on read. Empty arrays
+ * produce an empty body that round-trips as an empty array. The shape `[""]`
+ * is not a supported input — an empty body is coerced to `[]` on read, so
+ * round-tripping `[""]` will yield `[]` (no bijection for that edge case).
  */
 export async function createDumpZip(
   manifest: Manifest,
@@ -19,12 +25,18 @@ export async function createDumpZip(
 
   const sortedKeys = Array.from(entries.keys()).sort();
   const hash = createHash('sha256');
+  const lenBuf = Buffer.alloc(4);
   for (const key of sortedKeys) {
-    const body = entries.get(key)!.join('\n');
+    const body = entries.get(key) ?? [];
+    const joined = body.join('\n');
+
+    lenBuf.writeUInt32BE(Buffer.byteLength(key), 0);
+    hash.update(lenBuf);
     hash.update(key);
-    hash.update('\0');
-    hash.update(body);
-    hash.update('\0');
+
+    lenBuf.writeUInt32BE(Buffer.byteLength(joined), 0);
+    hash.update(lenBuf);
+    hash.update(joined);
   }
   const sha256 = hash.digest('hex');
 
@@ -32,7 +44,7 @@ export async function createDumpZip(
   zip.file(MANIFEST_FILE, JSON.stringify(finalManifest, null, 2));
 
   for (const key of sortedKeys) {
-    zip.file(key, entries.get(key)!.join('\n'));
+    zip.file(key, (entries.get(key) ?? []).join('\n'));
   }
 
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
@@ -59,12 +71,18 @@ export async function readDumpZip(
 
   const sortedKeys = Array.from(entries.keys()).sort();
   const hash = createHash('sha256');
+  const lenBuf = Buffer.alloc(4);
   for (const key of sortedKeys) {
-    const body = entries.get(key)!.join('\n');
+    const body = entries.get(key) ?? [];
+    const joined = body.join('\n');
+
+    lenBuf.writeUInt32BE(Buffer.byteLength(key), 0);
+    hash.update(lenBuf);
     hash.update(key);
-    hash.update('\0');
-    hash.update(body);
-    hash.update('\0');
+
+    lenBuf.writeUInt32BE(Buffer.byteLength(joined), 0);
+    hash.update(lenBuf);
+    hash.update(joined);
   }
   const computed = hash.digest('hex');
   if (computed !== manifest.sha256) {
