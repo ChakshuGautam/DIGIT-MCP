@@ -458,3 +458,102 @@ async function testEngineDumpTenant() {
 
 await testEngineDumpTenant();
 console.log('✓ engine: dumpTenant');
+
+import { restoreFromFilestore } from './src/dump/engine.js';
+
+async function testEngineRestore() {
+  // First create a small dump via dumpTenant, then restore it onto a fresh target.
+  // We reuse the test client pattern. To stay simple, the source has nothing
+  // (empty surfaces), so restore is a no-op apply that exercises the orchestration.
+
+  const filestoreStore = new Map<string, Buffer>();
+  const registryRows: Record<string, unknown>[] = [];
+
+  function buildClient() {
+    return {
+      async mdmsSchemaSearch(_t: string, codes?: string[]) {
+        if (codes?.includes('mcp-dumps.DumpRegistry')) {
+          return registryRows.length > 0 ? [{ code: 'mcp-dumps.DumpRegistry' }] : [];
+        }
+        return [];
+      },
+      async mdmsSchemaCreate(_t: string, code: string) { return { code }; },
+      async mdmsV2Create(_t: string, schemaCode: string, _uid: string, data: unknown) {
+        if (schemaCode === 'mcp-dumps.DumpRegistry') registryRows.push(data as Record<string, unknown>);
+        return { id: 'x' };
+      },
+      async mdmsV2SearchRaw(_t: string, schemaCode: string) {
+        if (schemaCode === 'mcp-dumps.DumpRegistry') return registryRows.map((d) => ({ data: d }));
+        return [];
+      },
+      async localizationSearch() { return []; },
+      async localizationUpsert() { return []; },
+      async workflowBusinessServiceSearch() { return []; },
+      async workflowBusinessServiceCreate() { return {}; },
+      async workflowBusinessServiceUpdate() { return {}; },
+      async boundaryHierarchySearch() { return []; },
+      async boundarySearch() { return []; },
+      async boundaryRelationshipTreeSearch() { return []; },
+      async boundaryHierarchyCreate() { return {}; },
+      async boundaryCreate() { return []; },
+      async boundaryRelationshipCreate() { return {}; },
+      async accessRolesSearch() { return []; },
+      async filestoreUpload(_t: string, _m: string, buf: Buffer, _fn: string, _ct: string) {
+        const id = `fs-${filestoreStore.size + 1}`;
+        filestoreStore.set(id, buf);
+        return [{ fileStoreId: id, tenantId: _t }];
+      },
+      async filestoreGetUrl(_t: string, fileStoreIds: string[]) {
+        return fileStoreIds.map((id) => ({ id, url: `inmem://${id}` }));
+      },
+      async filestoreDownload(_t: string, id: string) {
+        const buf = filestoreStore.get(id);
+        if (!buf) throw new Error(`not_found: ${id}`);
+        return buf;
+      },
+      getAuthInfo() { return { user: { userName: 'ADMIN' }, authenticated: true, stateTenantId: 'pwt', token: 'tok' }; },
+      getEnvironmentInfo() { return { name: 'unit-test', url: 'http://test', stateTenantId: 'pwt' }; },
+    } as never;
+  }
+
+  const client = buildClient();
+
+  // Take a dump
+  const { dumpTenant } = await import('./src/dump/engine.js');
+  const dumpResult = await dumpTenant(client, { tenant_id: 'pwt.test', include: ['self'] });
+
+  // Restore by filestore_id directly (skips registry resolution)
+  const report = await restoreFromFilestore(client, {
+    tenant_id: 'pwt.test',
+    filestore_id: dumpResult.filestore_id,
+    on_conflict: 'skip',
+    dry_run: false,
+  });
+  assert.equal(report.ok, true);
+  assert.equal(report.partial, false);
+  assert.equal(report.surfaces.length, 6, `expected 6 surface reports, got ${report.surfaces.length}`);
+
+  // Negative: cross-root restore should fail with the right error token
+  const report2 = await restoreFromFilestore(client, {
+    tenant_id: 'ke.nairobi',                                     // target root differs
+    filestore_id: dumpResult.filestore_id,                       // source root was 'pwt'
+    on_conflict: 'skip',
+    dry_run: false,
+  });
+  assert.equal(report2.ok, false);
+  assert.match(report2.error || '', /cross_root_restore_not_supported/);
+
+  // Dry-run by version "latest"
+  const report3 = await restoreFromFilestore(client, {
+    tenant_id: 'pwt.test',
+    version: 'latest',
+    on_conflict: 'skip',
+    dry_run: true,
+  });
+  assert.equal(report3.ok, true);
+  // dry_run report should still have 6 surface entries
+  assert.equal(report3.surfaces.length, 6);
+}
+
+await testEngineRestore();
+console.log('✓ engine: restoreFromFilestore');

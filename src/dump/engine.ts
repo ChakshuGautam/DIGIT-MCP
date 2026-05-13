@@ -4,14 +4,18 @@ import type {
   Manifest,
   DumpOpts,
   RegistryRow,
+  ApplyReport,
+  SurfaceReport,
+  ConflictPolicy,
 } from './types.js';
 import { ALL_SURFACES } from './types.js';
 import { createDumpZip, readDumpZip } from './zip.js';
-import { SURFACE_REGISTRY } from './surfaces/index.js';
+import { SURFACE_REGISTRY, RESTORE_ORDER } from './surfaces/index.js';
 import {
   ensureRegistrySchema,
   nextVersion,
   writeRegistryRow,
+  listRegistryRows,
 } from './registry.js';
 
 // Structural shape of the methods we need from DigitApiClient.
@@ -23,6 +27,7 @@ export interface EngineClient {
   mdmsV2Create(tenantId: string, schemaCode: string, uniqueIdentifier: string, data: unknown): Promise<unknown>;
   mdmsV2SearchRaw(tenantId: string, schemaCode: string, options?: { limit?: number; offset?: number }): Promise<Record<string, unknown>[]>;
   filestoreUpload(tenantId: string, module: string, fileBuffer: Buffer, fileName: string, contentType: string): Promise<Record<string, unknown>[]>;
+  filestoreDownload(tenantId: string, fileStoreId: string): Promise<Buffer>;
   getAuthInfo(): { user?: { userName?: string } | null; [k: string]: unknown };
   getEnvironmentInfo(): { name?: string; [k: string]: unknown };
   // Plus each surface's own methods — relied on structurally
@@ -165,5 +170,119 @@ export async function dumpTenant(
     size_bytes: zipBuf.length,
     sha256,
     counts,
+  };
+}
+
+interface RestoreArgs {
+  tenant_id: string;                   // target
+  version?: string;                    // 'latest' | 'v3'
+  filestore_id?: string;
+  on_conflict?: ConflictPolicy;
+  dry_run?: boolean;
+  surfaces?: SurfaceName[];
+  wait_for_persist?: boolean;
+}
+
+type SurfaceModuleFull = {
+  name: SurfaceName;
+  dump(client: unknown, tenantId: string, opts: DumpOpts): AsyncIterable<string>;
+  restore(client: unknown, lines: AsyncIterable<string>, target: string, opts: { onConflict: ConflictPolicy; dryRun: boolean }): Promise<SurfaceReport>;
+};
+
+async function* linesOf(arr: string[]): AsyncIterable<string> {
+  for (const line of arr) yield line;
+}
+
+export async function restoreFromFilestore(
+  client: EngineClient,
+  args: RestoreArgs,
+): Promise<ApplyReport> {
+  const target = args.tenant_id;
+  const onConflict: ConflictPolicy = args.on_conflict || 'skip';
+  const dryRun = args.dry_run === true;
+
+  const emptyTotals = { created: 0, updated: 0, skipped: 0, failed: 0 };
+
+  // 1. Resolve filestore_id
+  let filestoreId = args.filestore_id;
+  if (!filestoreId) {
+    const versionWanted = args.version || 'latest';
+    const rows = await listRegistryRows(client, target);
+    if (rows.length === 0) {
+      return { ok: false, partial: false, surfaces: [], totals: { ...emptyTotals }, error: `no_dumps_for_tenant: ${target}` };
+    }
+    if (versionWanted === 'latest') {
+      // sort by version desc
+      const sorted = [...rows].sort((a, b) => {
+        const an = parseInt(a.version.replace(/\D/g, ''), 10) || 0;
+        const bn = parseInt(b.version.replace(/\D/g, ''), 10) || 0;
+        return bn - an;
+      });
+      filestoreId = sorted[0].filestore_id;
+    } else {
+      const match = rows.find((r) => r.version === versionWanted);
+      if (!match) {
+        return { ok: false, partial: false, surfaces: [], totals: { ...emptyTotals }, error: `version_not_found: ${versionWanted}` };
+      }
+      filestoreId = match.filestore_id;
+    }
+  }
+
+  // 2. Download and unzip
+  const buf = await client.filestoreDownload(target, filestoreId);
+  let manifestEntries: { manifest: Manifest; entries: Map<string, string[]> };
+  try {
+    manifestEntries = await readDumpZip(buf);
+  } catch (err) {
+    return { ok: false, partial: false, surfaces: [], totals: { ...emptyTotals }, error: err instanceof Error ? err.message : String(err) };
+  }
+  const { manifest, entries } = manifestEntries;
+
+  // 3. Cross-root guard
+  const sourceRoot = rootOf(manifest.tenant_id);
+  const targetRoot = rootOf(target);
+  if (sourceRoot !== targetRoot) {
+    return {
+      ok: false, partial: false, surfaces: [], totals: { ...emptyTotals },
+      error: `cross_root_restore_not_supported: source=${sourceRoot} target=${targetRoot}`,
+    };
+  }
+
+  // 4. Apply each surface in RESTORE_ORDER (filtered by args.surfaces if given)
+  const enabledSurfaces = args.surfaces && args.surfaces.length > 0 ? new Set(args.surfaces) : null;
+  const reports: SurfaceReport[] = [];
+  const totals = { ...emptyTotals };
+  let aborted = false;
+
+  for (const surfaceName of RESTORE_ORDER) {
+    if (enabledSurfaces && !enabledSurfaces.has(surfaceName)) continue;
+
+    // Find entries for this surface (try .jsonl first, then .json)
+    const surfaceEntries = entries.get(`${surfaceName}.jsonl`) ?? entries.get(`${surfaceName}.json`);
+    if (!surfaceEntries) {
+      // empty report
+      reports.push({ surface: surfaceName, created: 0, updated: 0, skipped: 0, failed: 0, errors: [] });
+      continue;
+    }
+
+    const surface = SURFACE_REGISTRY[surfaceName] as SurfaceModuleFull;
+    const report = await surface.restore(client, linesOf(surfaceEntries), target, { onConflict, dryRun });
+    reports.push(report);
+    totals.created += report.created;
+    totals.updated += report.updated;
+    totals.skipped += report.skipped;
+    totals.failed += report.failed;
+    if (report.abortedAt) { aborted = true; break; }
+  }
+
+  // 5. Wait for persist — only if the client supports kafkaLag and dryRun is false.
+  // TODO: wire up client.kafkaLag('egov-infra-persist') poll loop (30s timeout) once
+  // DigitApiClient exposes a structural kafkaLag method on the EngineClient interface.
+
+  return {
+    ok: !aborted,
+    partial: aborted,
+    surfaces: reports,
+    totals,
   };
 }
