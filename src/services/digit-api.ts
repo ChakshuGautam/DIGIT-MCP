@@ -22,32 +22,54 @@ export class ApiClientError extends Error {
   }
 }
 
+// One cached identity per root tenant. Multiple roots can be authenticated
+// concurrently in the same process — e.g. on Nairobi where the same DIGIT
+// installation hosts `ke` and `pg` as independent roots.
+interface AuthCtx {
+  token: string;
+  userInfo: UserInfo;
+  loginTenantId: string;
+}
+
 class DigitApiClient {
   private environment: Environment;
-  private stateTenantOverride: string | null = null;
-  private authToken: string | null = null;
-  private userInfo: UserInfo | null = null;
+  private tokensByRoot: Map<string, AuthCtx> = new Map();
+  // Fallback root for calls that don't carry a tenantId we can derive from.
+  private activeRoot: string | null = null;
 
   constructor() {
     this.environment = getEnvironment();
   }
 
-  getEnvironmentInfo(): Environment {
-    if (this.stateTenantOverride) {
-      return { ...this.environment, stateTenantId: this.stateTenantOverride };
+  // "ke.nairobi" → "ke", "pg" → "pg", undefined → activeRoot
+  private rootOf(tenantId?: string | null): string | null {
+    if (!tenantId) return this.activeRoot;
+    return tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
+  }
+
+  private resolveCtx(rootTenant?: string | null): AuthCtx | null {
+    const root = this.rootOf(rootTenant);
+    if (!root) return null;
+    return this.tokensByRoot.get(root) || null;
+  }
+
+  getEnvironmentInfo(rootTenant?: string | null): Environment {
+    const root = this.rootOf(rootTenant);
+    if (root) {
+      return { ...this.environment, stateTenantId: root };
     }
     return this.environment;
   }
 
   setEnvironment(envKey: string): void {
     this.environment = getEnvironment(envKey);
-    this.stateTenantOverride = null;
-    this.authToken = null;
-    this.userInfo = null;
+    this.tokensByRoot.clear();
+    this.activeRoot = null;
   }
 
+  // Cheap pointer swap. Tokens for other roots stay cached.
   setStateTenant(tenantId: string): void {
-    this.stateTenantOverride = tenantId;
+    this.activeRoot = this.rootOf(tenantId);
   }
 
   /**
@@ -65,21 +87,25 @@ class DigitApiClient {
       description: `Ad-hoc connection to ${url}`,
       endpointOverrides,
     };
-    this.stateTenantOverride = null;
-    this.authToken = null;
-    this.userInfo = null;
+    this.tokensByRoot.clear();
+    this.activeRoot = null;
   }
 
-  isAuthenticated(): boolean {
-    return this.authToken !== null;
+  isAuthenticated(rootTenant?: string | null): boolean {
+    if (rootTenant === undefined) return this.tokensByRoot.size > 0;
+    return this.resolveCtx(rootTenant) !== null;
   }
 
-  getAuthInfo(): { authenticated: boolean; user: UserInfo | null; stateTenantId: string; token: string | null } {
+  getAuthInfo(
+    rootTenant?: string | null,
+  ): { authenticated: boolean; user: UserInfo | null; stateTenantId: string; token: string | null; authenticatedRoots: string[] } {
+    const ctx = this.resolveCtx(rootTenant);
     return {
       authenticated: this.isAuthenticated(),
-      user: this.userInfo,
-      stateTenantId: this.getEnvironmentInfo().stateTenantId,
-      token: this.authToken,
+      user: ctx?.userInfo || null,
+      stateTenantId: this.getEnvironmentInfo(rootTenant).stateTenantId,
+      token: ctx?.token || null,
+      authenticatedRoots: Array.from(this.tokensByRoot.keys()),
     };
   }
 
@@ -88,14 +114,15 @@ class DigitApiClient {
     return this.environment.endpointOverrides?.[key] || ENDPOINTS[key];
   }
 
-  private buildRequestInfo(): RequestInfo {
+  private buildRequestInfo(rootTenant?: string | null): RequestInfo {
+    const ctx = this.resolveCtx(rootTenant);
     return {
       apiId: 'Rainmaker',
       ver: '1.0',
       ts: Date.now(),
       msgId: `${Date.now()}|en_IN`,
-      authToken: this.authToken || '',
-      userInfo: this.userInfo || undefined,
+      authToken: ctx?.token || '',
+      userInfo: ctx?.userInfo || undefined,
     };
   }
 
@@ -131,31 +158,88 @@ class DigitApiClient {
     }
 
     const data = await response.json() as { access_token: string; UserRequest: UserInfo };
-    this.authToken = data.access_token;
-    this.userInfo = data.UserRequest;
+    const derivedRoot = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
 
-    // Auto-detect state tenant from login tenant ID
-    // e.g. "statea.f" → "statea", "pg.citya" → "pg", "pg" → "pg"
-    const derivedState = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
-    // Set override if different from environment default, otherwise clear any previous override
-    this.stateTenantOverride = derivedState !== this.environment.stateTenantId ? derivedState : null;
+    this.tokensByRoot.set(derivedRoot, {
+      token: data.access_token,
+      userInfo: data.UserRequest,
+      loginTenantId: tenantId,
+    });
+    // Just-logged-in root becomes the fallback for unscoped calls.
+    this.activeRoot = derivedRoot;
   }
 
   private static readonly RETRY_STATUS_CODES = new Set([429, 503]);
   private static readonly MAX_RETRIES = 3;
 
+  /**
+   * Pull a tenantId out of the request envelope so we can pick the right
+   * per-root token. Most DIGIT APIs put it in one of a handful of known slots;
+   * fall back to the active root if none is found.
+   */
+  private extractTenantFromBody(body: Record<string, unknown>): string | null {
+    const b = body as Record<string, unknown>;
+    if (typeof b.tenantId === 'string') return b.tenantId;
+    const slotKeys = [
+      'MdmsCriteria', 'Mdms', 'SchemaDefinition', 'SchemaDefCriteria',
+      'Boundary', 'BoundaryRelationship', 'BoundaryHierarchy',
+      'BoundaryTypeHierarchySearchCriteria', 'user', 'service',
+      'ResourceDetails',
+    ];
+    for (const key of slotKeys) {
+      const slot = b[key];
+      if (slot && typeof slot === 'object' && !Array.isArray(slot)) {
+        const t = (slot as Record<string, unknown>).tenantId;
+        if (typeof t === 'string') return t;
+      }
+    }
+    const arrayKeys = ['Employees', 'BusinessServices', 'idRequests'];
+    for (const key of arrayKeys) {
+      const arr = b[key];
+      if (Array.isArray(arr) && arr.length > 0 && typeof arr[0] === 'object') {
+        const t = (arr[0] as Record<string, unknown>).tenantId;
+        if (typeof t === 'string') return t;
+      }
+    }
+    return null;
+  }
+
+  private extractTenantFromUrl(endpoint: string): string | null {
+    const qIdx = endpoint.indexOf('?');
+    if (qIdx === -1) return null;
+    const params = new URLSearchParams(endpoint.slice(qIdx + 1));
+    return params.get('tenantId');
+  }
+
   private async request<T = unknown>(
     endpoint: string,
-    body: Record<string, unknown>
+    body: Record<string, unknown>,
+    rootTenant?: string | null,
   ): Promise<T> {
     const url = `${this.environment.url}${endpoint}`;
+
+    // Derive root: explicit arg > body > URL query > activeRoot fallback.
+    const derived =
+      rootTenant ??
+      this.extractTenantFromBody(body) ??
+      this.extractTenantFromUrl(endpoint);
+    const ctx = this.resolveCtx(derived);
+
+    // buildRequestInfo() may have stamped the active-root token. Re-stamp with
+    // the per-call ctx so the body's RequestInfo.authToken matches the
+    // Authorization header.
+    if (ctx && body.RequestInfo && typeof body.RequestInfo === 'object') {
+      const ri = body.RequestInfo as Record<string, unknown>;
+      ri.authToken = ctx.token;
+      if (!ri.userInfo) ri.userInfo = ctx.userInfo;
+    }
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
 
-    if (this.authToken) {
-      headers['Authorization'] = `Bearer ${this.authToken}`;
+    if (ctx?.token) {
+      headers['Authorization'] = `Bearer ${ctx.token}`;
     }
 
     const jsonBody = JSON.stringify(body);
@@ -547,7 +631,8 @@ class DigitApiClient {
     const headers: Record<string, string> = {
       'Content-Type': `multipart/form-data; boundary=${boundary}`,
     };
-    if (this.authToken) headers['Authorization'] = `Bearer ${this.authToken}`;
+    const uploadCtx = this.resolveCtx(tenantId);
+    if (uploadCtx?.token) headers['Authorization'] = `Bearer ${uploadCtx.token}`;
 
     const response = await fetch(url, { method: 'POST', headers, body });
     const data = await response.json() as Record<string, unknown>;
@@ -625,11 +710,13 @@ class DigitApiClient {
     address: Record<string, unknown>,
     citizen?: Record<string, unknown>
   ): Promise<Record<string, unknown>> {
-    // Build citizen from provided data or from logged-in user
-    const env = this.getEnvironmentInfo();
-    const citizenInfo = citizen || (this.userInfo ? {
-      mobileNumber: this.userInfo.mobileNumber || '0000000000',
-      name: this.userInfo.name,
+    // Build citizen from provided data or from the user that owns the
+    // matching root's token (multi-root: each root has its own identity).
+    const env = this.getEnvironmentInfo(tenantId);
+    const ctxUser = this.resolveCtx(tenantId)?.userInfo;
+    const citizenInfo = citizen || (ctxUser ? {
+      mobileNumber: ctxUser.mobileNumber || '0000000000',
+      name: ctxUser.name,
       type: 'CITIZEN',
       roles: [{ code: 'CITIZEN', name: 'Citizen', tenantId: env.stateTenantId }],
       tenantId: env.stateTenantId,
@@ -750,7 +837,8 @@ class DigitApiClient {
 
     const url = `${this.environment.url}${this.endpoint('FILESTORE_URL')}?${params.toString()}`;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (this.authToken) headers['Authorization'] = `Bearer ${this.authToken}`;
+    const fileCtx = this.resolveCtx(tenantId);
+    if (fileCtx?.token) headers['Authorization'] = `Bearer ${fileCtx.token}`;
 
     const response = await fetch(url, { method: 'GET', headers });
 

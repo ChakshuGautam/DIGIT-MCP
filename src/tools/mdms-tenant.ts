@@ -216,9 +216,16 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       const baseUrl = args.base_url as string | undefined;
       const envKey = (args.environment as string) || process.env.CRS_ENVIRONMENT || 'chakshu-digit';
 
-      // Switch environment: ad-hoc URL or named environment
+      // Switch environment: ad-hoc URL or named environment.
+      // Only swap (and drop cached tokens) when the target URL actually changes —
+      // otherwise re-configuring for a second root tenant would wipe the first
+      // root's cached token.
+      const currentEnv = digitApi.getEnvironmentInfo();
       if (baseUrl) {
-        digitApi.setAdHocEnvironment(baseUrl);
+        const targetUrl = baseUrl.replace(/\/+$/, '');
+        if (currentEnv.url !== targetUrl) {
+          digitApi.setAdHocEnvironment(baseUrl);
+        }
       } else {
         if (!ENVIRONMENTS[envKey]) {
           return JSON.stringify({
@@ -226,7 +233,9 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
             error: `Unknown environment "${envKey}". Available: ${Object.keys(ENVIRONMENTS).join(', ')}`,
           }, null, 2);
         }
-        digitApi.setEnvironment(envKey);
+        if (currentEnv.url !== ENVIRONMENTS[envKey].url) {
+          digitApi.setEnvironment(envKey);
+        }
       }
 
       const env = digitApi.getEnvironmentInfo();
@@ -459,6 +468,7 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
             stateTenantId: env.stateTenantId,
           },
           authenticated: auth.authenticated,
+          authenticatedRoots: auth.authenticatedRoots,
           user: auth.user ? { userName: auth.user.userName, tenantId: auth.user.tenantId } : null,
           available: Object.entries(ENVIRONMENTS).map(([key, e]) => ({
             key,
