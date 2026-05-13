@@ -138,3 +138,52 @@ async function testMdmsSchemasSurface() {
 
 await testMdmsSchemasSurface();
 console.log('✓ surface: mdms-schemas');
+
+import { mdmsDataSurface } from './src/dump/surfaces/mdmsData.js';
+
+async function testMdmsDataSurface() {
+  const allSchemas = [
+    { code: 'common-masters.Department' },
+    { code: 'mcp-dumps.DumpRegistry' },   // must be excluded
+  ];
+  const recordsBySchema: Record<string, Record<string, unknown>[]> = {
+    'common-masters.Department': [
+      { tenantId: 'pwt.test', schemaCode: 'common-masters.Department', uniqueIdentifier: 'd1', data: { code: 'ENG' }, isActive: true },
+      { tenantId: 'pwt.test', schemaCode: 'common-masters.Department', uniqueIdentifier: 'd2', data: { code: 'OPS' }, isActive: true },
+    ],
+  };
+  const createCalls: unknown[] = [];
+  const client = {
+    async mdmsSchemaSearch() { return allSchemas; },
+    async mdmsV2SearchRaw(_t: string, schemaCode: string) {
+      return recordsBySchema[schemaCode] || [];
+    },
+    async mdmsV2Create(tenantId: string, schemaCode: string, uniqueIdentifier: string, data: unknown) {
+      createCalls.push({ tenantId, schemaCode, uniqueIdentifier, data });
+      return { id: 'x' };
+    },
+  } as never;
+
+  // Dump: emits 2 lines, both for Department (registry schema filtered out)
+  const lines: string[] = [];
+  for await (const line of mdmsDataSurface.dump(client, 'pwt.test', { tenantIds: ['pwt.test'], include: ['self'] })) {
+    lines.push(line);
+  }
+  assert.equal(lines.length, 2);
+
+  // Restore onto empty target, on_conflict=skip — all created
+  async function* iter() { yield* lines; }
+  const emptyClient = {
+    async mdmsV2SearchRaw() { return []; },
+    async mdmsV2Create(tenantId: string, schemaCode: string, uniqueIdentifier: string, data: unknown) {
+      createCalls.push({ tenantId, schemaCode, uniqueIdentifier, data });
+      return { id: 'x' };
+    },
+  } as never;
+  const report = await mdmsDataSurface.restore(emptyClient, iter(), 'pwt.test', { onConflict: 'skip', dryRun: false });
+  assert.equal(report.created, 2);
+  assert.equal(report.skipped, 0);
+}
+
+await testMdmsDataSurface();
+console.log('✓ surface: mdms-data');
