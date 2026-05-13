@@ -187,3 +187,58 @@ async function testMdmsDataSurface() {
 
 await testMdmsDataSurface();
 console.log('✓ surface: mdms-data');
+
+import { localizationSurface } from './src/dump/surfaces/localization.js';
+
+async function testLocalizationSurface() {
+  const stateInfo = [{ data: { languages: [{ value: 'en_IN' }, { value: 'sw_KE' }] } }];
+  const messagesByLocale: Record<string, Record<string, unknown>[]> = {
+    en_IN: [
+      { code: 'HOME', message: 'Home', module: 'rainmaker-common' },
+      { code: 'COMPLAINT', message: 'Complaint', module: 'rainmaker-pgr' },
+      { code: 'SETTINGS', message: 'Settings', module: 'rainmaker-common' },
+    ],
+    sw_KE: [
+      { code: 'HOME', message: 'Nyumbani', module: 'rainmaker-common' },
+      { code: 'COMPLAINT', message: 'Lalamiko', module: 'rainmaker-pgr' },
+      { code: 'SETTINGS', message: 'Mipangilio', module: 'rainmaker-common' },
+    ],
+  };
+  const upserts: unknown[] = [];
+
+  const client = {
+    async mdmsV2SearchRaw(_t: string, schemaCode: string) {
+      return schemaCode === 'common-masters.StateInfo' ? stateInfo : [];
+    },
+    async localizationSearch(_t: string, locale: string, _module?: string) {
+      return messagesByLocale[locale] || [];
+    },
+    async localizationUpsert(_t: string, locale: string, messages: { code: string; message: string; module: string }[]) {
+      upserts.push({ locale, messages });
+      return messages;
+    },
+  } as never;
+
+  // Dump: 6 messages (2 locales × 3 messages each)
+  const lines: string[] = [];
+  for await (const line of localizationSurface.dump(client, 'pwt.test', { tenantIds: ['pwt.test'], include: ['self'] })) {
+    lines.push(line);
+  }
+  assert.equal(lines.length, 6, `expected 6 message lines, got ${lines.length}`);
+
+  // Restore against an empty target — all created
+  async function* iter() { yield* lines; }
+  const emptyClient = {
+    async localizationSearch() { return []; },     // nothing present at target
+    async localizationUpsert(_t: string, locale: string, messages: { code: string; message: string; module: string }[]) {
+      upserts.push({ locale, messages });
+      return messages;
+    },
+  } as never;
+  const report = await localizationSurface.restore(emptyClient, iter(), 'pwt.test', { onConflict: 'skip', dryRun: false });
+  assert.equal(report.created, 6);
+  assert.equal(report.skipped, 0);
+}
+
+await testLocalizationSurface();
+console.log('✓ surface: localization');
