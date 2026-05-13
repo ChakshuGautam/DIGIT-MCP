@@ -770,6 +770,26 @@ class DigitApiClient {
     return (data.fileStoreIds as Record<string, unknown>[]) || [];
   }
 
+  /**
+   * Download the raw bytes of a filestore entry by ID. Two-step internally:
+   * first fetches the signed URL via `/filestore/v1/files/url`, then GETs that URL.
+   */
+  async filestoreDownload(
+    tenantId: string,
+    fileStoreId: string,
+  ): Promise<Buffer> {
+    const urls = await this.filestoreGetUrl(tenantId, [fileStoreId]);
+    const entry = urls[0] as Record<string, unknown> | undefined;
+    const url = entry?.url as string | undefined;
+    if (!url) throw new Error(`filestore_url_not_found: ${fileStoreId}`);
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`filestore_download_failed: ${response.status} for ${fileStoreId}`);
+    }
+    return Buffer.from(await response.arrayBuffer());
+  }
+
   // Access control roles search — tenantId as query param
   async accessRolesSearch(
     tenantId: string
