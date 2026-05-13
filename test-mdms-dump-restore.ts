@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import JSZip from 'jszip';
 import { createDumpZip, readDumpZip } from './src/dump/zip.js';
 import type { Manifest } from './src/dump/types.js';
+import { ensureRegistrySchema, nextVersion, writeRegistryRow, listRegistryRows, REGISTRY_SCHEMA_CODE } from './src/dump/registry.js';
 
 const manifest: Manifest = {
   version: 'v1',
@@ -45,3 +46,58 @@ async function testZipRoundTrip() {
 
 await testZipRoundTrip();
 console.log('✓ zip round-trip');
+
+async function testRegistry() {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const stubSchemas: Record<string, unknown>[] = [];
+  const stubData: Record<string, unknown>[] = [];
+
+  const client = {
+    async mdmsSchemaSearch(tenantId: string, codes?: string[]) {
+      calls.push({ method: 'mdmsSchemaSearch', args: [tenantId, codes] });
+      if (codes?.includes(REGISTRY_SCHEMA_CODE)) {
+        return stubSchemas.filter((s) => s.code === REGISTRY_SCHEMA_CODE);
+      }
+      return [];
+    },
+    async mdmsSchemaCreate(tenantId: string, code: string, description: string, definition: unknown) {
+      calls.push({ method: 'mdmsSchemaCreate', args: [tenantId, code, description, definition] });
+      stubSchemas.push({ code, tenantId });
+      return { code };
+    },
+    async mdmsV2Create(tenantId: string, schemaCode: string, uniqueIdentifier: string, data: unknown) {
+      calls.push({ method: 'mdmsV2Create', args: [tenantId, schemaCode, uniqueIdentifier, data] });
+      stubData.push({ tenantId, schemaCode, uniqueIdentifier, data, isActive: true });
+      return { id: 'x', schemaCode, tenantId, uniqueIdentifier, data };
+    },
+    async mdmsV2SearchRaw(tenantId: string, schemaCode: string) {
+      calls.push({ method: 'mdmsV2SearchRaw', args: [tenantId, schemaCode] });
+      return stubData.filter((d) => d.schemaCode === schemaCode);
+    },
+  } as never;
+
+  // 1) ensureRegistrySchema is idempotent
+  await ensureRegistrySchema(client, 'pwt.test');
+  await ensureRegistrySchema(client, 'pwt.test');
+  const createCalls = calls.filter((c) => c.method === 'mdmsSchemaCreate');
+  assert.equal(createCalls.length, 1, 'schema should be created exactly once');
+
+  // 2) nextVersion is monotonic
+  const v1 = await nextVersion(client, 'pwt.test');
+  assert.equal(v1, 'v1');
+  await writeRegistryRow(client, {
+    tenant_id: 'pwt.test', version: v1,
+    filestore_id: 'fs-1', created_at: 'now', size_bytes: 100,
+    sha256: 'a'.repeat(64), surfaces: ['mdms-data'], include: ['self'],
+  });
+  const v2 = await nextVersion(client, 'pwt.test');
+  assert.equal(v2, 'v2');
+
+  // 3) listRegistryRows returns rows
+  const rows = await listRegistryRows(client, 'pwt.test');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].version, 'v1');
+}
+
+await testRegistry();
+console.log('✓ registry');
