@@ -296,3 +296,55 @@ async function testWorkflowSurface() {
 
 await testWorkflowSurface();
 console.log('✓ surface: workflow');
+
+import { boundarySurface } from './src/dump/surfaces/boundary.js';
+
+async function testBoundarySurface() {
+  const sourceHierarchies = [{ hierarchyType: 'ADMIN', boundaryHierarchy: [{ boundaryType: 'State', parentBoundaryType: null }, { boundaryType: 'City', parentBoundaryType: 'State' }] }];
+  const sourceEntities = [
+    { code: 'pwt.test', tenantId: 'pwt.test', hierarchyType: 'ADMIN', boundaryType: 'State' },
+    { code: 'pwt.test.city1', tenantId: 'pwt.test', hierarchyType: 'ADMIN', boundaryType: 'City' },
+  ];
+  const sourceRelTree = [{ code: 'pwt.test', parent: null, children: [{ code: 'pwt.test.city1', parent: 'pwt.test' }] }];
+
+  const client = {
+    async boundaryHierarchySearch() { return sourceHierarchies; },
+    async boundarySearch() { return sourceEntities; },
+    async boundaryRelationshipTreeSearch() { return sourceRelTree; },
+  } as never;
+
+  // Dump emits 1 JSON line (single document)
+  const lines: string[] = [];
+  for await (const line of boundarySurface.dump(client, 'pwt.test', { tenantIds: ['pwt.test'], include: ['self'] })) {
+    lines.push(line);
+  }
+  assert.equal(lines.length, 1);
+  const doc = JSON.parse(lines[0]) as { hierarchies: unknown[]; entities: unknown[]; relationships: unknown[] };
+  assert.equal(doc.hierarchies.length, 1);
+  assert.equal(doc.entities.length, 2);
+  assert.ok(doc.relationships.length >= 1);
+
+  // Restore onto empty target — 1 hierarchy + 2 entities + relationships created
+  const hierarchyCreates: unknown[] = [];
+  const entityCreates: unknown[] = [];
+  const relCreates: unknown[] = [];
+
+  async function* iter() { yield* lines; }
+  const restoreClient = {
+    async boundaryHierarchySearch() { return []; },
+    async boundarySearch() { return []; },
+    async boundaryRelationshipTreeSearch() { return []; },
+    async boundaryHierarchyCreate(_t: string, ht: string, _bh: unknown[]) { hierarchyCreates.push(ht); return { hierarchyType: ht }; },
+    async boundaryCreate(_t: string, bs: unknown[]) { entityCreates.push(...bs); return bs; },
+    async boundaryRelationshipCreate(_t: string, code: string) { relCreates.push(code); return { code }; },
+  } as never;
+
+  const report = await boundarySurface.restore(restoreClient, iter(), 'pwt.test', { onConflict: 'skip', dryRun: false });
+  assert.ok(report.created >= 3, `expected >= 3 creates, got ${report.created}`);
+  assert.equal(hierarchyCreates.length, 1);
+  assert.equal(entityCreates.length, 2);
+  assert.ok(relCreates.length >= 1);
+}
+
+await testBoundarySurface();
+console.log('✓ surface: boundary');
