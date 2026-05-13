@@ -13,7 +13,7 @@ export const ALL_GROUPS: ToolGroup[] = ['core', 'mdms', 'boundary', 'masters', '
 export interface ToolMetadata {
   name: string;
   group: ToolGroup;
-  category: 'discovery' | 'environment' | 'mdms' | 'validation' | 'localization' | 'pgr' | 'workflow' | 'filestore' | 'access-control' | 'idgen' | 'location' | 'encryption' | 'boundary-mgmt' | 'hrms' | 'user' | 'docs' | 'monitoring' | 'tracing' | 'sessions';
+  category: 'discovery' | 'environment' | 'mdms' | 'validation' | 'localization' | 'pgr' | 'workflow' | 'filestore' | 'access-control' | 'idgen' | 'location' | 'encryption' | 'boundary-mgmt' | 'hrms' | 'user' | 'docs' | 'monitoring' | 'tracing' | 'sessions' | 'dumps';
   risk: 'read' | 'write';
   description: string;
   inputSchema: Record<string, unknown>;
