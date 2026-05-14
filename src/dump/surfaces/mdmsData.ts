@@ -117,8 +117,25 @@ export const mdmsDataSurface = {
           }
         }
       } catch (err) {
-        report.failed++;
-        report.errors.push({ identifier: `${row.schemaCode}/${uid}`, message: err instanceof Error ? err.message : String(err) });
+        const msg = err instanceof Error ? err.message : String(err);
+        const errObj = err as { code?: string; errors?: { code?: string }[] } | undefined;
+        // DIGIT MDMS protects fields listed in `x-unique` from being modified
+        // by an update — the API returns "Updating fields defined as unique is
+        // not allowed" / `MDMS_UNIQUE_FIELD_UPDATE_ERR`. Faithful round-trips
+        // hit this on records the dump captured verbatim. Treat as a no-op:
+        // downgrade to skipped, but keep an info-note in errors so the
+        // operator sees the count.
+        const isXUniqueProtected =
+          msg.includes('Updating fields defined as unique is not allowed') ||
+          errObj?.code === 'MDMS_UNIQUE_FIELD_UPDATE_ERR' ||
+          (Array.isArray(errObj?.errors) && errObj.errors.some((e) => e?.code === 'MDMS_UNIQUE_FIELD_UPDATE_ERR'));
+        if (isXUniqueProtected) {
+          report.skipped++;
+          report.errors.push({ identifier: `${row.schemaCode}/${uid}`, message: `note: x-unique field protection — skipped: ${msg}` });
+        } else {
+          report.failed++;
+          report.errors.push({ identifier: `${row.schemaCode}/${uid}`, message: msg });
+        }
       }
     }
     return report;

@@ -732,3 +732,59 @@ async function testMdmsDataOverwriteUsesUpdate() {
 
 await testMdmsDataOverwriteUsesUpdate();
 console.log('✓ surface: mdms-data (overwrite uses Update not Create)');
+
+async function testMdmsSchemasOverwriteSkipsExisting() {
+  const client = {
+    async mdmsSchemaSearch() { return [{ code: 'foo.bar' }]; },
+    async mdmsSchemaCreate() { throw new Error('should not be called when exists+overwrite'); },
+  } as never;
+  async function* iter() { yield JSON.stringify({ code: 'foo.bar', description: '', definition: {} }); }
+  const report = await mdmsSchemasSurface.restore(client, iter(), 'pwt.test', { onConflict: 'overwrite', dryRun: false });
+  assert.equal(report.failed, 0);
+  assert.equal(report.skipped, 1);
+}
+await testMdmsSchemasOverwriteSkipsExisting();
+console.log('✓ surface: mdms-schemas (overwrite skips existing)');
+
+async function testAccessControlOverwriteUsesUpdate() {
+  const liveRole = {
+    id: 'role-uuid', tenantId: 'pwt', schemaCode: 'ACCESSCONTROL-ROLES.roles',
+    uniqueIdentifier: 'GRO',
+    data: { code: 'GRO', name: 'Old Name' }, isActive: true,
+  };
+  const updates: unknown[] = [];
+  const client = {
+    async mdmsV2SearchRaw() { return [liveRole]; },
+    async mdmsV2Create() { throw new Error('should not be called when exists+overwrite'); },
+    async mdmsV2Update(rec: { id: string }, isActive: boolean) {
+      updates.push({ id: rec.id, isActive });
+      return rec;
+    },
+  } as never;
+  async function* iter() { yield JSON.stringify({ code: 'GRO', name: 'Updated' }); }
+  const report = await accessControlSurface.restore(client, iter(), 'pwt.test', { onConflict: 'overwrite', dryRun: false });
+  assert.equal(report.failed, 0);
+  assert.equal(report.updated, 1);
+  assert.equal(updates.length, 1);
+  assert.equal((updates[0] as { id: string }).id, 'role-uuid');
+  assert.equal((updates[0] as { isActive: boolean }).isActive, true);
+}
+await testAccessControlOverwriteUsesUpdate();
+console.log('✓ surface: access-control (overwrite uses Update)');
+
+async function testMdmsDataXUniqueDowngrade() {
+  const liveRec = { id: 'r1', tenantId: 'pwt', schemaCode: 'common-masters.StateInfo', uniqueIdentifier: 'pg', data: { code: 'pg' }, auditDetails: {}, isActive: true };
+  const client = {
+    async mdmsV2SearchRaw() { return [liveRec]; },
+    async mdmsV2Create() { throw new Error('should not be called'); },
+    async mdmsV2Update() { throw new Error('Updating fields defined as unique is not allowed.'); },
+  } as never;
+  async function* iter() { yield JSON.stringify({ tenantId: 'pwt', schemaCode: 'common-masters.StateInfo', uniqueIdentifier: 'pg', data: { code: 'pg', extra: 'X' } }); }
+  const report = await mdmsDataSurface.restore(client, iter(), 'pwt.test', { onConflict: 'overwrite', dryRun: false });
+  assert.equal(report.failed, 0, 'x-unique error must NOT count as failure');
+  assert.equal(report.skipped, 1, 'x-unique error must count as skipped');
+  assert.equal(report.errors.length, 1, 'should still record the error in the notes for visibility');
+  assert.match(report.errors[0].message, /unique/i);
+}
+await testMdmsDataXUniqueDowngrade();
+console.log('✓ surface: mdms-data (x-unique downgrade)');

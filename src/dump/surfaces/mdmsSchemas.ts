@@ -41,7 +41,12 @@ export const mdmsSchemasSurface = {
       if (exists) {
         if (opts.onConflict === 'skip')      { report.skipped++; continue; }
         if (opts.onConflict === 'fail')      { report.abortedAt = { identifier: code }; return report; }
-        // overwrite: MDMS schema create is upsert on code
+        // overwrite: DIGIT MDMS has no schema-update primitive, and a duplicate
+        // create returns 400 (`Schema code already exists` /
+        // `SCHEMA_ALREADY_EXISTS_ERR`). The schema is already in place at the
+        // target, so the operator's intent is satisfied — record as skipped.
+        report.skipped++;
+        continue;
       }
 
       if (opts.dryRun) {
@@ -54,8 +59,24 @@ export const mdmsSchemasSurface = {
         if (exists) report.updated++; else report.created++;
         existing.add(code);
       } catch (err) {
-        report.failed++;
-        report.errors.push({ identifier: code, message: err instanceof Error ? err.message : String(err) });
+        // Race condition: another writer (or a parallel restore) created the
+        // schema between our search and our create. DIGIT returns
+        // `SCHEMA_ALREADY_EXISTS_ERR` / "Schema code already exists" — downgrade
+        // to skipped (still record an info-note in errors for visibility).
+        const msg = err instanceof Error ? err.message : String(err);
+        const errCode = (err as { code?: string; errors?: { code?: string }[] } | undefined);
+        const isAlreadyExists =
+          msg.includes('Schema code already exists') ||
+          errCode?.code === 'SCHEMA_ALREADY_EXISTS_ERR' ||
+          (Array.isArray(errCode?.errors) && errCode.errors.some((e) => e?.code === 'SCHEMA_ALREADY_EXISTS_ERR'));
+        if (isAlreadyExists) {
+          report.skipped++;
+          report.errors.push({ identifier: code, message: `note: schema already exists at target (race) — skipped: ${msg}` });
+          existing.add(code);
+        } else {
+          report.failed++;
+          report.errors.push({ identifier: code, message: msg });
+        }
       }
     }
     return report;
