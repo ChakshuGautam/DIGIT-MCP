@@ -2,6 +2,7 @@ import type { ToolMetadata, MdmsRecord } from '../types/index.js';
 import { MDMS_SCHEMAS } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
+import { emitProgress } from '../services/progress.js';
 import { ENVIRONMENTS } from '../config/environments.js';
 import { autoPaginate, PAGINATION_SCHEMA_PROPERTIES } from '../utils/pagination.js';
 import type { PaginationOptions } from '../utils/pagination.js';
@@ -878,7 +879,10 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         data: { copied: [], skipped: [], failed: [] },
       };
 
+      emitProgress({ phase: 'bootstrap:start', message: `Bootstrapping ${target} from ${source}`, data: { source, target }, pct: 0 });
+
       // Step 1: Copy ALL schemas from source to target
+      emitProgress({ phase: 'schemas:start', message: 'Copying MDMS schema definitions', pct: 5 });
       const sourceSchemas = await digitApi.mdmsSchemaSearch(source);
       for (const schema of sourceSchemas) {
         const code = schema.code as string;
@@ -897,13 +901,29 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         }
       }
 
+      emitProgress({
+        phase: 'schemas:done',
+        message: `Schemas copied (${results.schemas.copied.length} new, ${results.schemas.skipped.length} existing, ${results.schemas.failed.length} failed)`,
+        data: {
+          copied: results.schemas.copied.length,
+          skipped: results.schemas.skipped.length,
+          failed: results.schemas.failed.length,
+        },
+        pct: 25,
+      });
+
       // Step 2: Create the root tenant record under itself
       // CRITICAL: tenant.tenants records MUST exist under the tenant's own root,
       // because services like idgen resolve city codes via v1 MDMS using the tenant prefix as root.
+      // The tenant.tenants schema requires both `code` and `tenantId` on the row
+      // payload — earlier versions omitted `tenantId` here, which made this write
+      // fail "required key [tenantId] not found" and cascaded into city_setup
+      // refusing to run because the root self-record never landed.
       try {
         await digitApi.mdmsV2Create(target, 'tenant.tenants', target, {
           code: target,
           name: target,
+          tenantId: target,
           description: `State tenant root: ${target}`,
           city: {
             code: target.toUpperCase(),
@@ -922,34 +942,108 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         }
       }
 
-      // Step 3: Copy essential MDMS data records
-      // IMPORTANT: ACCESSCONTROL-ROLES.roles MUST be copied before user provisioning (Step 4),
-      // because DIGIT's user service validates role codes against MDMS.
+      // Step 3: Copy essential MDMS data records.
+      //
+      // Order matters: ACCESSCONTROL-ACTIONS-TEST.actions-test must land before
+      // ACCESSCONTROL-ROLEACTIONS.roleactions (the latter x-refs action ids in
+      // the former), and ACCESSCONTROL-ROLES.roles must land before user
+      // provisioning in Step 4 (user-service validates role codes against MDMS).
+      //
+      // What's NOT on this list: anything genuinely tenant-scoped (boundary
+      // localities, locality-overrides). Schema definitions for those are
+      // copied in Step 1 but their data is owned by the city setup flow.
       const essentialSchemas = [
+        // ── access control: actions → roles → role↔action mappings ──
+        // Without roleactions on the new tenant, digit-ui's startup MDMS read
+        // returns empty and the employee landing renders blank. The earlier
+        // "shared via access-control service" rationale was wrong — the UI
+        // reads role→action mappings directly from MDMS at the target tenant.
+        'ACCESSCONTROL-ACTIONS-TEST.actions-test',
         'ACCESSCONTROL-ROLES.roles',
-        // NOTE: ACCESSCONTROL-ROLEACTIONS.roleactions deliberately excluded — it has x-ref-schema
-        // dependencies on ACCESSCONTROL-ACTIONS.actions (hundreds of records). Role *codes* are
-        // enough for user provisioning; role-action mappings are shared via access-control service.
+        'ACCESSCONTROL-ROLEACTIONS.roleactions',
+        // ── tenant module discovery ──
+        // citymodule rows tell the UI which modules (PGR/HRMS/etc.) are
+        // available on the tenant; without them the citizen menu is empty.
+        'tenant.citymodule',
+        // ── ID generators ──
         'common-masters.IdFormat',
+        // ── HRMS reference data ──
         'common-masters.Department',
-        // DataSecurity schemas — required by services that embed egov-enc-service (inbox, PGR, user).
-        // Without these, the encryption policy @PostConstruct init fails and the service won't start.
-        'DataSecurity.DecryptionABAC',
-        'DataSecurity.EncryptionPolicy',
-        'DataSecurity.SecurityPolicy',
-        'DataSecurity.MaskingPatterns',
         'common-masters.Designation',
-        'common-masters.StateInfo',
         'common-masters.GenderType',
         'egov-hrms.EmployeeStatus',
         'egov-hrms.EmployeeType',
         'egov-hrms.DeactivationReason',
+        'egov-hrms.Degree',
+        'egov-hrms.EmploymentTest',
+        'egov-hrms.Specalization',
+        // ── DataSecurity ──
+        // Required by services that embed egov-enc-service (inbox, PGR, user).
+        // Without these, encryption policy @PostConstruct init fails and the
+        // service won't start.
+        'DataSecurity.DecryptionABAC',
+        'DataSecurity.EncryptionPolicy',
+        'DataSecurity.SecurityPolicy',
+        'DataSecurity.MaskingPatterns',
+        // ── branding + UI shell ──
+        'common-masters.StateInfo',
+        'common-masters.uiHomePage',
+        'common-masters.wfSlaConfig',
+        'common-masters.CronJobAPIConfig',
+        // ── PGR ──
         'RAINMAKER-PGR.ServiceDefs',
+        'RAINMAKER-PGR.UIConstants',
+        // ── workflow (definition is copied separately in Step 6 below;
+        //    these are the MDMS-side companion configs) ──
         'Workflow.BusinessService',
+        'Workflow.BusinessServiceConfig',
+        'Workflow.BusinessServiceMasterConfig',
+        'Workflow.AutoEscalation',
+        'Workflow.AutoEscalationStatesToIgnore',
+        // ── inbox ──
         'INBOX.InboxQueryConfiguration',
       ];
 
-      for (const schemaCode of essentialSchemas) {
+      // The MDMS schema definition + data writes go through Kafka and there's
+      // a window (~0.5–3s) after schema create where data create returns
+      // SCHEMA_DEFINITION_NOT_FOUND_ERR even though the schema was just copied
+      // in Step 1. Retry a small number of times before declaring the record
+      // a failure. The dataloader had this fix; the MCP didn't.
+      async function mdmsCreateWithSchemaWait(
+        tenant: string,
+        schemaCode: string,
+        uniqueIdentifier: string,
+        data: Record<string, unknown>,
+      ): Promise<void> {
+        const maxAttempts = 4;
+        let lastErr: unknown;
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          try {
+            await digitApi.mdmsV2Create(tenant, schemaCode, uniqueIdentifier, data);
+            return;
+          } catch (err) {
+            lastErr = err;
+            const msg = err instanceof Error ? err.message : String(err);
+            const isSchemaRace =
+              msg.includes('SCHEMA_DEFINITION_NOT_FOUND_ERR') ||
+              msg.includes('Schema definition against which data is being created is not found');
+            if (!isSchemaRace || attempt === maxAttempts - 1) throw err;
+            await new Promise((res) => setTimeout(res, 500 * (1 << attempt))); // 500ms, 1s, 2s
+          }
+        }
+        throw lastErr;
+      }
+
+      emitProgress({ phase: 'data:start', message: `Copying essential MDMS data across ${essentialSchemas.length} schemas`, pct: 35 });
+
+      for (let i = 0; i < essentialSchemas.length; i++) {
+        const schemaCode = essentialSchemas[i];
+        emitProgress({
+          phase: 'data:schema',
+          message: `Copying ${schemaCode}`,
+          data: { schema: schemaCode, index: i + 1, total: essentialSchemas.length },
+          pct: 35 + Math.floor((i / essentialSchemas.length) * 40),
+        });
         try {
           // Fetch source records and existing target records for this schema
           const sourceRecords = await digitApi.mdmsV2SearchRaw(source, schemaCode, { limit: 500 });
@@ -967,8 +1061,8 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
                 await digitApi.mdmsV2Update(existing, true);
                 results.data.copied.push(`${schemaCode}/${record.uniqueIdentifier} (reactivated)`);
               } else {
-                // Doesn't exist — create
-                await digitApi.mdmsV2Create(target, schemaCode, record.uniqueIdentifier, record.data);
+                // Doesn't exist — create (with schema-persistence retry)
+                await mdmsCreateWithSchemaWait(target, schemaCode, record.uniqueIdentifier, record.data);
                 results.data.copied.push(`${schemaCode}/${record.uniqueIdentifier}`);
               }
             } catch (error) {
@@ -981,6 +1075,19 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           console.error(`[tenant_bootstrap] Schema "${schemaCode}" data copy skipped: ${schemaErr instanceof Error ? schemaErr.message : String(schemaErr)}`);
         }
       }
+
+      emitProgress({
+        phase: 'data:done',
+        message: `Data copied (${results.data.copied.length} new, ${results.data.skipped.length} existing, ${results.data.failed.length} failed)`,
+        data: {
+          copied: results.data.copied.length,
+          skipped: results.data.skipped.length,
+          failed: results.data.failed.length,
+        },
+        pct: 75,
+      });
+
+      emitProgress({ phase: 'admin:start', message: 'Provisioning ADMIN user on the new tenant', pct: 80 });
 
       // Step 4: Provision ADMIN user on target tenant
       // DIGIT auth scopes user lookup by tenantId — a user created under "pg" can't be found
@@ -1081,7 +1188,15 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         userProvisionError = msg;
       }
 
+      emitProgress({
+        phase: 'admin:done',
+        message: userProvisioned ? 'ADMIN user ready' : 'ADMIN user not provisioned',
+        data: { provisioned: !!userProvisioned, error: userProvisionError || undefined },
+        pct: 90,
+      });
+
       // Step 5: Copy workflow definitions
+      emitProgress({ phase: 'workflow:start', message: 'Copying PGR / business-service workflow definitions', pct: 92 });
       let workflowResults = { created: [] as string[], skipped: [] as string[], failed: [] as string[] };
       try {
         workflowResults = await copyWorkflowDefinitions(source, target);
@@ -1089,8 +1204,31 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         workflowResults.failed.push(`workflow copy error: ${err instanceof Error ? err.message : String(err)}`);
       }
 
+      // success now factors in workflow failures too — was previously omitted.
+      const overallSuccess =
+        results.schemas.failed.length === 0 &&
+        results.data.failed.length === 0 &&
+        workflowResults.failed.length === 0;
+
+      emitProgress({
+        phase: 'bootstrap:done',
+        message: overallSuccess ? 'Tenant bootstrap complete' : 'Tenant bootstrap completed with failures (see results.*.failed)',
+        data: {
+          success: overallSuccess,
+          summary: {
+            schemas_copied: results.schemas.copied.length,
+            schemas_failed: results.schemas.failed.length,
+            data_copied: results.data.copied.length,
+            data_failed: results.data.failed.length,
+            workflows_created: workflowResults.created.length,
+            workflows_failed: workflowResults.failed.length,
+          },
+        },
+        pct: 100,
+      });
+
       return JSON.stringify({
-        success: results.schemas.failed.length === 0 && results.data.failed.length === 0,
+        success: overallSuccess,
         source,
         target,
         summary: {
@@ -1502,13 +1640,156 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         steps.boundaries = boundaryResult;
       }
 
+      // Step 6: Seed an HRMS admin employee linked to the ADMIN user.
+      //
+      // Why this step exists: tenant_bootstrap + steps 1–3 above produce a
+      // tenant whose ADMIN user can log in and file complaints, but PGR's
+      // Assign action requires an assignee with an `eg_hrms_employee` row
+      // (tied to a department + designation + jurisdiction). Without it,
+      // every assign-onward workflow step returns 400. Newman's full
+      // complaints-demo suite fails 7/13 on a fresh tenant without this.
+      //
+      // We pick the first available department + designation from the root's
+      // common-masters MDMS — those rows were just copied by tenant_bootstrap
+      // so they're guaranteed to exist. Failures here are non-fatal: city
+      // creation already succeeded, the operator can call employee_create
+      // explicitly with a different department later.
+      const employeeResult: { provisioned: boolean; code?: string; department?: string; designation?: string; error?: string } = {
+        provisioned: false,
+      };
+      try {
+        const auth = digitApi.getAuthInfo();
+        const adminUserName = auth.user?.userName || process.env.CRS_USERNAME || 'ADMIN';
+
+        const [depts, desigs] = await Promise.all([
+          digitApi.mdmsV2SearchRaw(root, 'common-masters.Department', { limit: 100 }),
+          digitApi.mdmsV2SearchRaw(root, 'common-masters.Designation', { limit: 100 }),
+        ]);
+        const deptCode = depts[0]?.uniqueIdentifier
+          || (depts[0]?.data as Record<string, unknown> | undefined)?.code as string | undefined;
+        const desigCode = desigs[0]?.uniqueIdentifier
+          || (desigs[0]?.data as Record<string, unknown> | undefined)?.code as string | undefined;
+
+        if (!deptCode || !desigCode) {
+          employeeResult.error = `Cannot seed HRMS employee: department/designation missing on root "${root}". Re-run tenant_bootstrap.`;
+        } else {
+          // Look up the admin user on the city so we get the right mobile
+          // number / uuid / email to attach the employee record to.
+          const cityUsers = await digitApi.userSearch(tenantId, { userName: adminUserName, limit: 1 });
+          const adminOnCity = cityUsers[0];
+
+          // Check if an HRMS employee already exists for this user. The user
+          // search returns the user; we then probe HRMS to avoid duplicate
+          // create attempts on idempotent re-runs.
+          let alreadyExists = false;
+          try {
+            const existingEmployees = await digitApi.employeeSearch(tenantId, {
+              codes: [adminUserName],
+              limit: 1,
+            });
+            if (existingEmployees.length > 0) alreadyExists = true;
+          } catch { /* HRMS search may 404 on a fresh tenant; treat as not-found */ }
+
+          if (alreadyExists) {
+            employeeResult.provisioned = true;
+            employeeResult.code = adminUserName;
+            employeeResult.department = deptCode;
+            employeeResult.designation = desigCode;
+          } else {
+            // Step 3 already provisioned the ADMIN user (dual-scoped on root +
+            // city). HRMS's employee_create normally also creates a user; we
+            // need to *link* to the existing one instead so we don't trip the
+            // "User already exists" duplicate-check. Search for the live user
+            // record (with uuid) and inline it onto the employee payload.
+            const cityAdminRecord = adminOnCity
+              ?? (await digitApi.userSearch(root, { userName: adminUserName, limit: 1 }))[0]
+              ?? null;
+
+            // Roles must be scoped to the root tenant (where ACCESSCONTROL-ROLES
+            // lives). Includes everything the PGR workflow gates on.
+            const pgrRoles = ['EMPLOYEE', 'GRO', 'DGRO', 'PGR_LME', 'PGR_VIEWER', 'CSR', 'SUPERUSER', 'CITIZEN'].map((c) => ({
+              code: c, name: c, tenantId: root,
+            }));
+
+            // Build the user inline. When we have an existing user we pass
+            // the uuid + id so HRMS recognises this as a link, not a create.
+            const userPayload: Record<string, unknown> = {
+              name: (cityAdminRecord?.name as string) || 'Administrator',
+              userName: adminUserName,
+              mobileNumber: (cityAdminRecord?.mobileNumber as string) || '9999999999',
+              emailId: (cityAdminRecord?.emailId as string) || null,
+              gender: (cityAdminRecord?.gender as string) || 'MALE',
+              type: 'EMPLOYEE',
+              active: true,
+              roles: pgrRoles,
+              tenantId: root,
+            };
+            if (cityAdminRecord?.uuid) userPayload.uuid = cityAdminRecord.uuid;
+            if (cityAdminRecord?.id) userPayload.id = cityAdminRecord.id;
+            // Only set password on a fresh user — sending it for an existing
+            // user is what trips DuplicateUserName on some HRMS builds.
+            if (!cityAdminRecord?.uuid) {
+              userPayload.password = process.env.CRS_PASSWORD || 'eGov@123';
+            }
+
+            const now = Date.now();
+            const employee: Record<string, unknown> = {
+              tenantId,
+              employeeType: 'PERMANENT',
+              employeeStatus: 'EMPLOYED',
+              dateOfAppointment: now,
+              code: adminUserName,
+              IsActive: true,
+              user: userPayload,
+              assignments: [{
+                department: deptCode,
+                designation: desigCode,
+                fromDate: now,
+                isCurrentAssignment: true,
+                isHOD: false,
+              }],
+              jurisdictions: [{
+                hierarchy: 'ADMIN',
+                boundaryType: 'City',
+                boundary: tenantId,
+                tenantId,
+                isActive: true,
+              }],
+            };
+
+            const created = await digitApi.employeeCreate(tenantId, [employee]);
+            if (created.length > 0) {
+              const c = created[0];
+              employeeResult.provisioned = true;
+              employeeResult.code = c.code as string | undefined;
+              employeeResult.department = deptCode;
+              employeeResult.designation = desigCode;
+
+              // HRMS doesn't reliably set the user password — reset via user-service so login works.
+              const user = c.user as Record<string, unknown> | undefined;
+              if (user?.uuid) {
+                try {
+                  const users = await digitApi.userSearch(root, { uuid: [user.uuid as string], limit: 1 });
+                  if (users.length > 0) {
+                    await digitApi.userUpdate({ ...users[0], password: process.env.CRS_PASSWORD || 'eGov@123' });
+                  }
+                } catch { /* non-fatal */ }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        employeeResult.error = err instanceof Error ? err.message : String(err);
+      }
+      steps.adminEmployee = employeeResult;
+
       return JSON.stringify({
         success: true,
         cityTenant: tenantId,
         root,
         steps,
         nextSteps: [
-          `Create employees: employee_create with tenant_id="${tenantId}"`,
+          `Create more employees: employee_create with tenant_id="${tenantId}"`,
           `Verify setup: validate_complaint_types, validate_employees with tenant_id="${tenantId}"`,
           `Create complaints: pgr_create with tenant_id="${tenantId}"`,
         ],

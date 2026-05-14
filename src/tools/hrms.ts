@@ -82,6 +82,10 @@ export function registerHrmsTools(registry: ToolRegistry): void {
           type: 'boolean',
           description: 'If true, validate inputs and check prerequisites without executing. Returns a preview of what would happen.',
         },
+        existing_user_uuid: {
+          type: 'string',
+          description: 'Optional. UUID of an already-provisioned eg_user record to link this employee to (avoids HRMS DuplicateUserName when the user was created out-of-band, e.g. via tenant_bootstrap or city_setup). Requires the matching HRMS build with the uuid-link short-circuit.',
+        },
       },
       required: ['tenant_id', 'name', 'mobile_number', 'roles', 'department', 'designation', 'jurisdiction_boundary_type', 'jurisdiction_boundary'],
     },
@@ -157,24 +161,33 @@ export function registerHrmsTools(registry: ToolRegistry): void {
         mappedRoles.push({ code: 'EMPLOYEE', name: 'Employee', tenantId: roleTenant });
       }
 
+      const existingUserUuid = args.existing_user_uuid as string | undefined;
+      const userPayload: Record<string, unknown> = {
+        name: args.name as string,
+        userName: args.mobile_number as string,
+        mobileNumber: args.mobile_number as string,
+        emailId: (args.email as string) || null,
+        gender: (args.gender as string) || null,
+        type: 'EMPLOYEE',
+        active: true,
+        roles: mappedRoles,
+        tenantId: roleTenant,
+      };
+      if (existingUserUuid) {
+        // Trigger HRMS's uuid-link short-circuit (digit-common-boundary-uuidlink+).
+        // Don't send a password — HRMS preserves the existing user's auth state.
+        userPayload.uuid = existingUserUuid;
+      } else {
+        userPayload.password = 'eGov@123';
+      }
+
       const employee: Record<string, unknown> = {
         tenantId,
         employeeType: (args.employee_type as string) || 'PERMANENT',
         employeeStatus: 'EMPLOYED',
         dateOfAppointment: (args.date_of_appointment as number) || now,
         IsActive: true,
-        user: {
-          name: args.name as string,
-          userName: args.mobile_number as string,
-          mobileNumber: args.mobile_number as string,
-          password: 'eGov@123',
-          emailId: (args.email as string) || null,
-          gender: (args.gender as string) || null,
-          type: 'EMPLOYEE',
-          active: true,
-          roles: mappedRoles,
-          tenantId: roleTenant,
-        },
+        user: userPayload,
         assignments: [
           {
             department: args.department as string,
