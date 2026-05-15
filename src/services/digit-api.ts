@@ -432,20 +432,23 @@ class DigitApiClient {
   async boundarySearch(
     tenantId: string,
     hierarchyType?: string,
-    options?: { limit?: number; offset?: number }
+    options?: { limit?: number; offset?: number; codes?: string[] }
   ): Promise<Record<string, unknown>[]> {
-    const boundary: Record<string, unknown> = {
-      tenantId,
-      limit: options?.limit || 100,
-      offset: options?.offset || 0,
-    };
-    if (hierarchyType) boundary.hierarchyType = hierarchyType;
+    // boundary-service /boundary/_search takes its filters as query-string
+    // params; the body is just RequestInfo. tenantId is always passed via
+    // query so that route's @RequestParam binding picks it up.
+    const params = new URLSearchParams({ tenantId });
+    if (hierarchyType) params.set('hierarchyType', hierarchyType);
+    if (options?.codes && options.codes.length > 0) {
+      params.set('codes', options.codes.join(','));
+    }
+    if (options?.limit !== undefined) params.set('limit', String(options.limit));
+    if (options?.offset !== undefined) params.set('offset', String(options.offset));
 
     const data = await this.request<{ Boundary?: Record<string, unknown>[] }>(
-      this.endpoint('BOUNDARY_SEARCH'),
+      `${this.endpoint('BOUNDARY_SEARCH')}?${params.toString()}`,
       {
         RequestInfo: this.buildRequestInfo(),
-        Boundary: boundary,
       }
     );
 

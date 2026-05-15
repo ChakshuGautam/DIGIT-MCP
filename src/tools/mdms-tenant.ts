@@ -2638,6 +2638,521 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
   } satisfies ToolMetadata);
 
   // ──────────────────────────────────────────
+  // mdms_update — generic single-record patch
+  // ──────────────────────────────────────────
+  // Wraps digitApi.mdmsV2Update with the search-for-audit-details handshake
+  // the v2 _update endpoint requires. Pass exactly one of `data` (full
+  // replacement of the record's data block) or `patch` (shallow merge over
+  // the existing data fields). Use `is_active` to flip active/inactive
+  // independently of either; omit to keep the current value.
+  registry.register({
+    name: 'mdms_update',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'write',
+    description:
+      'Update an existing MDMS v2 record. Fetches the current record (for id + auditDetails), ' +
+      'applies the requested change, and submits to _update. Pass `data` for full data replacement, ' +
+      '`patch` for shallow merge, and/or `is_active` to flip active state.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID the record lives on (must match record.tenantId exactly — inherited records cannot be updated from a child tenant).',
+        },
+        schema_code: { type: 'string', description: 'MDMS schema code, e.g. "common-masters.UserValidation".' },
+        unique_identifier: { type: 'string', description: 'The record\'s uniqueIdentifier.' },
+        data: { type: 'object', description: 'Optional. Full replacement for the record\'s `data` block. Mutually exclusive with `patch`.' },
+        patch: { type: 'object', description: 'Optional. Top-level keys to merge into existing data. Mutually exclusive with `data`.' },
+        is_active: { type: 'boolean', description: 'Optional. Set true/false to flip active state. Omit to keep current.' },
+      },
+      required: ['tenant_id', 'schema_code', 'unique_identifier'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.schema_code as string, 'schema_code');
+      validateResourceId(args.unique_identifier as string, 'unique_identifier');
+
+      if (args.data && args.patch) {
+        return JSON.stringify({ success: false, error: '`data` and `patch` are mutually exclusive — pass one or the other.' }, null, 2);
+      }
+      if (!args.data && !args.patch && args.is_active === undefined) {
+        return JSON.stringify({ success: false, error: 'Nothing to update. Provide `data`, `patch`, or `is_active`.' }, null, 2);
+      }
+
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const schemaCode = args.schema_code as string;
+      const uniqueIdentifier = args.unique_identifier as string;
+
+      // Fetch existing record. Must search at the tenant the record actually
+      // lives on — MDMS won't let you _update an inherited record under a
+      // child tenant's scope.
+      const existing = await digitApi.mdmsV2SearchRaw(tenantId, schemaCode, {
+        uniqueIdentifiers: [uniqueIdentifier],
+        limit: 1,
+      });
+      if (existing.length === 0) {
+        return JSON.stringify({
+          success: false,
+          error: `Record not found: ${schemaCode}/${uniqueIdentifier} at tenant "${tenantId}".`,
+          hint: 'mdms_update only operates on records owned by the given tenant. If the record was inherited from a parent tenant, call mdms_update on the parent.',
+        }, null, 2);
+      }
+      const record = existing[0];
+
+      const newData =
+        args.data !== undefined
+          ? (args.data as Record<string, unknown>)
+          : args.patch !== undefined
+            ? { ...record.data, ...(args.patch as Record<string, unknown>) }
+            : record.data;
+
+      const newActive = args.is_active === undefined ? record.isActive : (args.is_active as boolean);
+
+      try {
+        const updated = await digitApi.mdmsV2Update(
+          { ...record, data: newData },
+          newActive,
+        );
+        return JSON.stringify({
+          success: true,
+          message: `Updated ${schemaCode}/${uniqueIdentifier}`,
+          record: {
+            id: updated.id,
+            tenantId: updated.tenantId,
+            schemaCode: updated.schemaCode,
+            uniqueIdentifier: updated.uniqueIdentifier,
+            data: updated.data,
+            isActive: updated.isActive,
+          },
+        }, null, 2);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return JSON.stringify({ success: false, error: msg }, null, 2);
+      }
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // mdms_repair_identity — bulk rewrite identity fields
+  // ──────────────────────────────────────────
+  // Maintenance tool for SQL-imported tenants whose records carry stale
+  // identity fields (e.g. data.tenantId="pg" on records that now live at
+  // "ke"). tenant_bootstrap's create-time identity rewrite doesn't cover
+  // this case — it only applies when copying records from source → target.
+  registry.register({
+    name: 'mdms_repair_identity',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'write',
+    description:
+      'Bulk-rewrite an identity field across all records of a schema at one tenant. ' +
+      'For each matching record, sets data.<field> to `to_value` and (optionally) reactivates. ' +
+      'Use this when records carry a stale tenant id from a SQL-dump import that predates ' +
+      'tenant_bootstrap\'s identity rewriting.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: { type: 'string', description: 'Tenant the records live on (their record.tenantId).' },
+        schema_code: { type: 'string', description: 'MDMS schema to scan.' },
+        field: { type: 'string', description: 'Identity field inside data to rewrite (default: "tenantId").' },
+        from_value: { type: 'string', description: 'Existing value to look for. If omitted, every record whose `field` ≠ `to_value` is repaired.' },
+        to_value: { type: 'string', description: 'Value to write (e.g. the correct tenant id).' },
+        reactivate: { type: 'boolean', description: 'Also flip isActive=true on repaired records. Default true.' },
+        dry_run: { type: 'boolean', description: 'If true, list what would be changed without writing.' },
+      },
+      required: ['tenant_id', 'schema_code', 'to_value'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.schema_code as string, 'schema_code');
+
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const schemaCode = args.schema_code as string;
+      const field = (args.field as string | undefined) || 'tenantId';
+      const fromValue = args.from_value as string | undefined;
+      const toValue = args.to_value as string;
+      const reactivate = (args.reactivate as boolean | undefined) ?? true;
+      const dryRun = args.dry_run === true;
+
+      type MdmsRow = Awaited<ReturnType<typeof digitApi.mdmsV2SearchRaw>>[number];
+      const records: MdmsRow[] = [];
+      let offset = 0;
+      const pageSize = 500;
+      while (true) {
+        const page = await digitApi.mdmsV2SearchRaw(tenantId, schemaCode, { limit: pageSize, offset });
+        if (page.length === 0) break;
+        // Only repair records actually owned at this tenant — inherited ones live on the parent.
+        for (const r of page) {
+          if (r.tenantId !== tenantId) continue;
+          records.push(r);
+        }
+        if (page.length < pageSize) break;
+        offset += pageSize;
+      }
+
+      const candidates = records.filter((r) => {
+        const current = r.data?.[field];
+        if (fromValue !== undefined) return current === fromValue;
+        return current !== undefined && current !== toValue;
+      });
+
+      if (dryRun) {
+        return JSON.stringify({
+          success: true,
+          dry_run: true,
+          tenant_id: tenantId,
+          schema_code: schemaCode,
+          scanned: records.length,
+          to_repair: candidates.length,
+          sample: candidates.slice(0, 5).map((r) => ({
+            uniqueIdentifier: r.uniqueIdentifier,
+            current: r.data?.[field],
+            isActive: r.isActive,
+          })),
+        }, null, 2);
+      }
+
+      let repaired = 0;
+      let failed = 0;
+      const failures: string[] = [];
+      for (const r of candidates) {
+        const newData = { ...r.data, [field]: toValue };
+        const targetActive = reactivate ? true : r.isActive;
+        try {
+          await digitApi.mdmsV2Update({ ...r, data: newData }, targetActive);
+          repaired++;
+        } catch (err) {
+          failed++;
+          if (failures.length < 10) {
+            failures.push(`${r.uniqueIdentifier}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+
+      return JSON.stringify({
+        success: failed === 0,
+        tenant_id: tenantId,
+        schema_code: schemaCode,
+        scanned: records.length,
+        repaired,
+        failed,
+        failures,
+      }, null, 2);
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // boundary_entity_search — list entities by tenant + codes
+  // ──────────────────────────────────────────
+  // Thin wrapper around boundary-service /boundary/_search, independent of
+  // egov-bndry-mgmnt (which 404s on tenants without bulk-mgmt history).
+  // Used by tests/verifiers that need to assert entity presence + scoping.
+  registry.register({
+    name: 'boundary_entity_search',
+    group: 'boundary',
+    category: 'boundary-mgmt',
+    risk: 'read',
+    description:
+      'Search boundary entities at a tenant. Direct call to boundary-service /boundary/_search, ' +
+      'independent of egov-bndry-mgmnt. Returns the raw entity rows (id, tenantId, code, geometry, auditDetails).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: { type: 'string', description: 'Tenant ID to search at.' },
+        codes: { type: 'array', items: { type: 'string' }, description: 'Optional. Boundary entity codes to filter.' },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      await ensureAuthenticated();
+      const tenantId = args.tenant_id as string;
+      const codes = (args.codes as string[] | undefined) ?? [];
+      const entities = await digitApi.boundarySearch(tenantId, undefined, { codes });
+      return JSON.stringify({
+        success: true,
+        tenantId,
+        count: entities.length,
+        entities,
+      }, null, 2);
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // boundary_entity_exists — primitive existence probe
+  // ──────────────────────────────────────────
+  // Per-code existence check. Cheap predicate for verify-before-write
+  // flows in city_setup_from_xlsx and similar — avoids the race that
+  // boundary-relationships/_create exposes when entity-batches are still
+  // in Kafka.
+  registry.register({
+    name: 'boundary_entity_exists',
+    group: 'boundary',
+    category: 'boundary-mgmt',
+    risk: 'read',
+    description:
+      'Return {exists: boolean} for a single boundary entity code at a tenant. ' +
+      'Used as a verify-before-write probe to dodge the boundary-service Kafka/cache race.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: { type: 'string' },
+        code: { type: 'string' },
+      },
+      required: ['tenant_id', 'code'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.code as string, 'code');
+      await ensureAuthenticated();
+      const tenantId = args.tenant_id as string;
+      const code = args.code as string;
+      try {
+        const entities = await digitApi.boundarySearch(tenantId, undefined, { codes: [code] });
+        const hit = (entities as Record<string, unknown>[]).find((e) => e.code === code);
+        return JSON.stringify({
+          success: true,
+          tenantId,
+          code,
+          exists: Boolean(hit),
+          entity: hit ?? null,
+        }, null, 2);
+      } catch (err) {
+        return JSON.stringify({
+          success: false,
+          tenantId,
+          code,
+          exists: false,
+          error: err instanceof Error ? err.message : String(err),
+        }, null, 2);
+      }
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // validate_boundary_hierarchy — assert level sequence + scoping
+  // ──────────────────────────────────────────
+  // Consolidates the boundary-hierarchy assertion that test suites and
+  // verifiers were rolling by hand: "the hierarchy named X at tenant Y
+  // has these N levels in order, owned by Y (not inherited)."
+  registry.register({
+    name: 'validate_boundary_hierarchy',
+    group: 'boundary',
+    category: 'boundary-mgmt',
+    risk: 'read',
+    description:
+      'Assert that a boundary hierarchy with the given `hierarchy_type` exists at `tenant_id` ' +
+      'with the expected level sequence (and is owned by that tenant, not inherited). ' +
+      'Returns a structured diff: missing levels, extra levels, mis-ordered levels, owner mismatch.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: { type: 'string', description: 'Tenant ID to look up the hierarchy at.' },
+        hierarchy_type: { type: 'string', description: 'Expected hierarchyType code, e.g. "ADMIN".' },
+        expected_levels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Expected boundary-type level names in topo order (root first).',
+        },
+      },
+      required: ['tenant_id', 'hierarchy_type', 'expected_levels'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      await ensureAuthenticated();
+      const tenantId = args.tenant_id as string;
+      const hierarchyType = args.hierarchy_type as string;
+      const expectedLevels = args.expected_levels as string[];
+
+      const hierarchies = await digitApi.boundaryHierarchySearch(tenantId, hierarchyType);
+      if (hierarchies.length === 0) {
+        return JSON.stringify({
+          success: true,
+          valid: false,
+          tenantId,
+          hierarchy_type: hierarchyType,
+          reason: `No hierarchy named "${hierarchyType}" found at tenant "${tenantId}".`,
+        }, null, 2);
+      }
+
+      // Pick the one whose tenantId matches exactly (defensive against
+      // future cases where search returns inherited matches).
+      const owned = (hierarchies as Record<string, unknown>[]).find((h) => h.tenantId === tenantId);
+      const h = (owned ?? hierarchies[0]) as Record<string, unknown>;
+      const ownerMatches = h.tenantId === tenantId;
+      const levels = (h.boundaryHierarchy as Array<{ boundaryType: string }> | undefined) ?? [];
+      const actualLevels = levels.map((l) => l.boundaryType);
+
+      const missing = expectedLevels.filter((l) => !actualLevels.includes(l));
+      const extra = actualLevels.filter((l) => !expectedLevels.includes(l));
+      const orderMatches = JSON.stringify(actualLevels) === JSON.stringify(expectedLevels);
+      const valid = ownerMatches && missing.length === 0 && extra.length === 0 && orderMatches;
+
+      return JSON.stringify({
+        success: true,
+        valid,
+        tenantId,
+        hierarchy_type: hierarchyType,
+        owner_actual: h.tenantId,
+        owner_matches: ownerMatches,
+        expected_levels: expectedLevels,
+        actual_levels: actualLevels,
+        missing,
+        extra,
+        order_matches: orderMatches,
+      }, null, 2);
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // tenant_destroy — true inverse of city_setup_from_xlsx
+  // ──────────────────────────────────────────
+  // tenant_cleanup correctly leaves inherited records alone, but
+  // city_setup_from_xlsx writes some city-relevant records (depts, desigs,
+  // complaint types, the tenant.tenants registration itself) AT THE ROOT
+  // — so a city-level cleanup can't reach them. tenant_destroy adds a
+  // best-effort second pass: given the city's tenant_id and (optionally)
+  // explicit codes to remove at root, it deactivates those root-level
+  // records too, then runs the standard city-level cleanup.
+  registry.register({
+    name: 'tenant_destroy',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'write',
+    description:
+      'Tear down a city tenant that was created with city_setup_from_xlsx. ' +
+      'Runs the standard city-level cleanup (deactivates city-owned records + users) ' +
+      'AND deactivates the named root-level records (depts/desigs/complaint types/tenant.tenants entry) ' +
+      'that city_setup_from_xlsx writes outside the city scope.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: { type: 'string', description: 'The city tenant_id to destroy, e.g. "ke.maputopoc".' },
+        department_codes: { type: 'array', items: { type: 'string' }, description: 'Department codes (at root) to deactivate. From the masters XLSX.' },
+        designation_codes: { type: 'array', items: { type: 'string' }, description: 'Designation codes (at root) to deactivate.' },
+        complaint_type_codes: { type: 'array', items: { type: 'string' }, description: 'Complaint type (RAINMAKER-PGR.ServiceDefs) codes (at root) to deactivate.' },
+        remove_tenant_registration: { type: 'boolean', description: 'Also deactivate the tenant.tenants record for this city at the root. Default true.' },
+        dry_run: { type: 'boolean' },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      await ensureAuthenticated();
+      const cityTenant = args.tenant_id as string;
+      const rootTenant = cityTenant.includes('.') ? cityTenant.split('.')[0] : cityTenant;
+      if (cityTenant === rootTenant) {
+        return JSON.stringify({
+          success: false,
+          error: `tenant_id "${cityTenant}" looks like a root tenant. tenant_destroy is for cities; refuse to operate on roots.`,
+        }, null, 2);
+      }
+      const cityCode = cityTenant.split('.').slice(1).join('.');
+      const deptCodes = (args.department_codes as string[] | undefined) ?? [];
+      const desigCodes = (args.designation_codes as string[] | undefined) ?? [];
+      const ctCodes = (args.complaint_type_codes as string[] | undefined) ?? [];
+      const removeRegistration = (args.remove_tenant_registration as boolean | undefined) ?? true;
+      const dryRun = args.dry_run === true;
+
+      const rootRecordsToDeactivate: Array<{ schemaCode: string; uniqueIdentifier: string }> = [];
+      for (const code of deptCodes) {
+        rootRecordsToDeactivate.push({ schemaCode: 'common-masters.Department', uniqueIdentifier: code });
+      }
+      for (const code of desigCodes) {
+        rootRecordsToDeactivate.push({ schemaCode: 'common-masters.Designation', uniqueIdentifier: code });
+      }
+      for (const code of ctCodes) {
+        rootRecordsToDeactivate.push({ schemaCode: 'RAINMAKER-PGR.ServiceDefs', uniqueIdentifier: code });
+      }
+      if (removeRegistration) {
+        rootRecordsToDeactivate.push({ schemaCode: 'tenant.tenants', uniqueIdentifier: cityCode });
+      }
+
+      if (dryRun) {
+        return JSON.stringify({
+          success: true,
+          dry_run: true,
+          city_tenant: cityTenant,
+          root_tenant: rootTenant,
+          city_cleanup: 'would call tenant_cleanup at city',
+          root_records_to_deactivate: rootRecordsToDeactivate,
+        }, null, 2);
+      }
+
+      const rootResults = { deactivated: 0, missing: 0, failed: 0, errors: [] as string[] };
+      for (const r of rootRecordsToDeactivate) {
+        try {
+          const found = await digitApi.mdmsV2SearchRaw(rootTenant, r.schemaCode, {
+            uniqueIdentifiers: [r.uniqueIdentifier],
+            limit: 1,
+          });
+          if (found.length === 0 || found[0].tenantId !== rootTenant) {
+            rootResults.missing++;
+            continue;
+          }
+          if (!found[0].isActive) {
+            rootResults.deactivated++; // already done
+            continue;
+          }
+          await digitApi.mdmsV2Update(found[0], false);
+          rootResults.deactivated++;
+        } catch (err) {
+          rootResults.failed++;
+          if (rootResults.errors.length < 10) {
+            rootResults.errors.push(`${r.schemaCode}/${r.uniqueIdentifier}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+
+      // City-side cleanup: deactivate any MDMS records owned at the city
+      // (e.g. the boundary hierarchy definition). The existing
+      // tenant_cleanup tool already does the safe city-only filter, but
+      // its handler isn't exposed as a callable from another handler — so
+      // we inline the equivalent paginated search + filter.
+      type MdmsRowAlias = Awaited<ReturnType<typeof digitApi.mdmsV2SearchRaw>>[number];
+      const cityRecords: MdmsRowAlias[] = [];
+      let cityOffset = 0;
+      while (true) {
+        const page = await digitApi.mdmsV2SearchRaw(cityTenant, '', { limit: 500, offset: cityOffset });
+        if (page.length === 0) break;
+        for (const rec of page) {
+          if (rec.tenantId === cityTenant) cityRecords.push(rec);
+        }
+        if (page.length < 500) break;
+        cityOffset += 500;
+      }
+
+      const cityResults = { deactivated: 0, failed: 0 };
+      for (const rec of cityRecords) {
+        if (!rec.isActive) continue;
+        try {
+          await digitApi.mdmsV2Update(rec, false);
+          cityResults.deactivated++;
+        } catch {
+          cityResults.failed++;
+        }
+      }
+
+      return JSON.stringify({
+        success: rootResults.failed === 0 && cityResults.failed === 0,
+        city_tenant: cityTenant,
+        root_tenant: rootTenant,
+        root: rootResults,
+        city: cityResults,
+        note: 'tenant_destroy did NOT touch users (use tenant_cleanup for that) ' +
+          'and did NOT delete boundary entities (boundary-service lacks a delete API). ' +
+          'Boundary hierarchy + relationships are also left in place; recreating with the same hierarchyType is idempotent.',
+      }, null, 2);
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
   // city_setup_from_xlsx — xlsx-based tenant setup
   // ──────────────────────────────────────────
   registry.register({
