@@ -2,6 +2,7 @@ import type { ToolMetadata, MdmsRecord } from '../types/index.js';
 import { MDMS_SCHEMAS } from '../types/index.js';
 import type { ToolRegistry } from './registry.js';
 import { digitApi } from '../services/digit-api.js';
+import { emitProgress } from '../services/progress.js';
 import { ENVIRONMENTS } from '../config/environments.js';
 import { autoPaginate, PAGINATION_SCHEMA_PROPERTIES } from '../utils/pagination.js';
 import type { PaginationOptions } from '../utils/pagination.js';
@@ -214,7 +215,7 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
     },
     handler: async (args) => {
       const baseUrl = args.base_url as string | undefined;
-      const envKey = (args.environment as string) || process.env.CRS_ENVIRONMENT || 'chakshu-digit';
+      const envKey = (args.environment as string) || process.env.CRS_ENVIRONMENT || 'self-hosted';
 
       // Switch environment: ad-hoc URL or named environment
       if (baseUrl) {
@@ -878,7 +879,10 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         data: { copied: [], skipped: [], failed: [] },
       };
 
+      emitProgress({ phase: 'bootstrap:start', message: `Bootstrapping ${target} from ${source}`, data: { source, target }, pct: 0 });
+
       // Step 1: Copy ALL schemas from source to target
+      emitProgress({ phase: 'schemas:start', message: 'Copying MDMS schema definitions', pct: 5 });
       const sourceSchemas = await digitApi.mdmsSchemaSearch(source);
       for (const schema of sourceSchemas) {
         const code = schema.code as string;
@@ -897,13 +901,29 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         }
       }
 
+      emitProgress({
+        phase: 'schemas:done',
+        message: `Schemas copied (${results.schemas.copied.length} new, ${results.schemas.skipped.length} existing, ${results.schemas.failed.length} failed)`,
+        data: {
+          copied: results.schemas.copied.length,
+          skipped: results.schemas.skipped.length,
+          failed: results.schemas.failed.length,
+        },
+        pct: 25,
+      });
+
       // Step 2: Create the root tenant record under itself
       // CRITICAL: tenant.tenants records MUST exist under the tenant's own root,
       // because services like idgen resolve city codes via v1 MDMS using the tenant prefix as root.
+      // The tenant.tenants schema requires both `code` and `tenantId` on the row
+      // payload — earlier versions omitted `tenantId` here, which made this write
+      // fail "required key [tenantId] not found" and cascaded into city_setup
+      // refusing to run because the root self-record never landed.
       try {
         await digitApi.mdmsV2Create(target, 'tenant.tenants', target, {
           code: target,
           name: target,
+          tenantId: target,
           description: `State tenant root: ${target}`,
           city: {
             code: target.toUpperCase(),
@@ -922,34 +942,179 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         }
       }
 
-      // Step 3: Copy essential MDMS data records
-      // IMPORTANT: ACCESSCONTROL-ROLES.roles MUST be copied before user provisioning (Step 4),
-      // because DIGIT's user service validates role codes against MDMS.
+      // Step 3: Copy essential MDMS data records.
+      //
+      // Order matters: ACCESSCONTROL-ACTIONS-TEST.actions-test must land before
+      // ACCESSCONTROL-ROLEACTIONS.roleactions (the latter x-refs action ids in
+      // the former), and ACCESSCONTROL-ROLES.roles must land before user
+      // provisioning in Step 4 (user-service validates role codes against MDMS).
+      //
+      // What's NOT on this list: anything genuinely tenant-scoped (boundary
+      // localities, locality-overrides). Schema definitions for those are
+      // copied in Step 1 but their data is owned by the city setup flow.
       const essentialSchemas = [
+        // ── access control: actions → roles → role↔action mappings ──
+        // Without roleactions on the new tenant, digit-ui's startup MDMS read
+        // returns empty and the employee landing renders blank. The earlier
+        // "shared via access-control service" rationale was wrong — the UI
+        // reads role→action mappings directly from MDMS at the target tenant.
+        'ACCESSCONTROL-ACTIONS-TEST.actions-test',
         'ACCESSCONTROL-ROLES.roles',
-        // NOTE: ACCESSCONTROL-ROLEACTIONS.roleactions deliberately excluded — it has x-ref-schema
-        // dependencies on ACCESSCONTROL-ACTIONS.actions (hundreds of records). Role *codes* are
-        // enough for user provisioning; role-action mappings are shared via access-control service.
+        'ACCESSCONTROL-ROLEACTIONS.roleactions',
+        // ── tenant module discovery ──
+        // citymodule rows tell the UI which modules (PGR/HRMS/etc.) are
+        // available on the tenant; without them the citizen menu is empty.
+        'tenant.citymodule',
+        // ── ID generators ──
         'common-masters.IdFormat',
+        // ── HRMS reference data ──
         'common-masters.Department',
-        // DataSecurity schemas — required by services that embed egov-enc-service (inbox, PGR, user).
-        // Without these, the encryption policy @PostConstruct init fails and the service won't start.
-        'DataSecurity.DecryptionABAC',
-        'DataSecurity.EncryptionPolicy',
-        'DataSecurity.SecurityPolicy',
-        'DataSecurity.MaskingPatterns',
         'common-masters.Designation',
-        'common-masters.StateInfo',
         'common-masters.GenderType',
         'egov-hrms.EmployeeStatus',
         'egov-hrms.EmployeeType',
         'egov-hrms.DeactivationReason',
+        'egov-hrms.Degree',
+        'egov-hrms.EmploymentTest',
+        'egov-hrms.Specalization',
+        // ── DataSecurity ──
+        // Required by services that embed egov-enc-service (inbox, PGR, user).
+        // Without these, encryption policy @PostConstruct init fails and the
+        // service won't start.
+        'DataSecurity.DecryptionABAC',
+        'DataSecurity.EncryptionPolicy',
+        'DataSecurity.SecurityPolicy',
+        'DataSecurity.MaskingPatterns',
+        // ── branding + UI shell ──
+        'common-masters.StateInfo',
+        'common-masters.uiHomePage',
+        'common-masters.wfSlaConfig',
+        'common-masters.CronJobAPIConfig',
+        // ── PGR ──
         'RAINMAKER-PGR.ServiceDefs',
+        'RAINMAKER-PGR.UIConstants',
+        // ── workflow (definition is copied separately in Step 6 below;
+        //    these are the MDMS-side companion configs) ──
         'Workflow.BusinessService',
+        'Workflow.BusinessServiceConfig',
+        'Workflow.BusinessServiceMasterConfig',
+        'Workflow.AutoEscalation',
+        'Workflow.AutoEscalationStatesToIgnore',
+        // ── inbox ──
         'INBOX.InboxQueryConfiguration',
       ];
 
-      for (const schemaCode of essentialSchemas) {
+      // The MDMS schema definition + data writes go through Kafka and there's
+      // a window (~0.5–3s) after schema create where data create returns
+      // SCHEMA_DEFINITION_NOT_FOUND_ERR even though the schema was just copied
+      // in Step 1. Retry a small number of times before declaring the record
+      // a failure. The dataloader had this fix; the MCP didn't.
+      async function mdmsCreateWithSchemaWait(
+        tenant: string,
+        schemaCode: string,
+        uniqueIdentifier: string,
+        data: Record<string, unknown>,
+      ): Promise<void> {
+        const maxAttempts = 4;
+        let lastErr: unknown;
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          try {
+            await digitApi.mdmsV2Create(tenant, schemaCode, uniqueIdentifier, data);
+            return;
+          } catch (err) {
+            lastErr = err;
+            const msg = err instanceof Error ? err.message : String(err);
+            const isSchemaRace =
+              msg.includes('SCHEMA_DEFINITION_NOT_FOUND_ERR') ||
+              msg.includes('Schema definition against which data is being created is not found');
+            if (!isSchemaRace || attempt === maxAttempts - 1) throw err;
+            await new Promise((res) => setTimeout(res, 500 * (1 << attempt))); // 500ms, 1s, 2s
+          }
+        }
+        throw lastErr;
+      }
+
+      // ────────────────────────────────────────────────────────────────
+      // Identity-rewrite map for record copy.
+      //
+      // Some MDMS records carry the source tenant's identity inside their
+      // payload (e.g. common-masters.StateInfo's `code` field IS the tenant
+      // code). Copying these verbatim leaves the new tenant labelled as
+      // the source — the digit-ui banner then renders TENANT_TENANTS_PG
+      // even though stateTenantId is "subhashini".
+      //
+      // For each schema below, when the listed field equals `source`
+      // (or starts with `source + "."`), rewrite it to point at `target`
+      // (or `target + ".<suffix>"` for the dotted-prefix case). We only
+      // rewrite values that actually mention the source — a record like
+      // ACCESSCONTROL-ROLES with `tenantId: "pg"` IS pg-scoped and
+      // should be retagged for the new root, but a SecurityPolicy with
+      // a tenantId of `*` shouldn't be touched.
+      const identityFieldsBySchema: Record<string, string[]> = {
+        'common-masters.StateInfo':            ['code', 'tenantId'],
+        'common-masters.uiHomePage':           ['tenantId'],
+        'common-masters.wfSlaConfig':          ['tenantId'],
+        'common-masters.CronJobAPIConfig':     ['tenantId'],
+        'common-masters.IdFormat':             ['tenantId'],
+        'common-masters.Department':           ['tenantId'],
+        'common-masters.Designation':          ['tenantId'],
+        'common-masters.GenderType':           ['tenantId'],
+        'tenant.citymodule':                   ['tenantId'],
+        'ACCESSCONTROL-ROLES.roles':           ['tenantId'],
+        'ACCESSCONTROL-ACTIONS-TEST.actions-test': ['tenantId'],
+        'ACCESSCONTROL-ROLEACTIONS.roleactions':   ['tenantId'],
+        'egov-hrms.EmployeeStatus':            ['tenantId'],
+        'egov-hrms.EmployeeType':              ['tenantId'],
+        'egov-hrms.DeactivationReason':        ['tenantId'],
+        'egov-hrms.Degree':                    ['tenantId'],
+        'egov-hrms.EmploymentTest':            ['tenantId'],
+        'egov-hrms.Specalization':             ['tenantId'],
+        'RAINMAKER-PGR.ServiceDefs':           ['tenantId'],
+        'RAINMAKER-PGR.UIConstants':           ['tenantId'],
+        'DataSecurity.DecryptionABAC':         ['tenantId'],
+        'DataSecurity.EncryptionPolicy':       ['tenantId'],
+        'DataSecurity.SecurityPolicy':         ['tenantId'],
+        'DataSecurity.MaskingPatterns':        ['tenantId'],
+        'INBOX.InboxQueryConfiguration':       ['tenantId'],
+        'Workflow.BusinessService':            ['tenantId'],
+        'Workflow.BusinessServiceConfig':      ['tenantId'],
+        'Workflow.BusinessServiceMasterConfig':['tenantId'],
+        'Workflow.AutoEscalation':             ['tenantId'],
+        'Workflow.AutoEscalationStatesToIgnore':['tenantId'],
+      };
+
+      function rewriteIdentityFields(
+        schemaCode: string,
+        data: Record<string, unknown>,
+        src: string,
+        tgt: string,
+      ): Record<string, unknown> {
+        const fields = identityFieldsBySchema[schemaCode];
+        if (!fields || fields.length === 0) return data;
+        const out: Record<string, unknown> = { ...data };
+        for (const field of fields) {
+          const v = out[field];
+          if (typeof v !== 'string') continue;
+          if (v === src) {
+            out[field] = tgt;
+          } else if (v.startsWith(src + '.')) {
+            // dotted-prefix: keep the suffix, swap the prefix
+            out[field] = tgt + v.substring(src.length);
+          }
+        }
+        return out;
+      }
+
+      emitProgress({ phase: 'data:start', message: `Copying essential MDMS data across ${essentialSchemas.length} schemas`, pct: 35 });
+
+      for (let i = 0; i < essentialSchemas.length; i++) {
+        const schemaCode = essentialSchemas[i];
+        emitProgress({
+          phase: 'data:schema',
+          message: `Copying ${schemaCode}`,
+          data: { schema: schemaCode, index: i + 1, total: essentialSchemas.length },
+          pct: 35 + Math.floor((i / essentialSchemas.length) * 40),
+        });
         try {
           // Fetch source records and existing target records for this schema
           const sourceRecords = await digitApi.mdmsV2SearchRaw(source, schemaCode, { limit: 500 });
@@ -963,12 +1128,23 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
                 // Already active — skip
                 results.data.skipped.push(`${schemaCode}/${record.uniqueIdentifier}`);
               } else if (existing && !existing.isActive) {
-                // Inactive (from cleanup) — re-activate via update
+                // Inactive (from cleanup) — re-activate via update.
+                // Identity fields don't need rewriting here — the existing
+                // record was already created at this tenant, so it carries
+                // the right identity.
                 await digitApi.mdmsV2Update(existing, true);
                 results.data.copied.push(`${schemaCode}/${record.uniqueIdentifier} (reactivated)`);
               } else {
-                // Doesn't exist — create
-                await digitApi.mdmsV2Create(target, schemaCode, record.uniqueIdentifier, record.data);
+                // Doesn't exist — create (with schema-persistence retry).
+                // Rewrite identity fields so the new tenant doesn't ship
+                // labelled with the source's tenant code.
+                const rewritten = rewriteIdentityFields(
+                  schemaCode,
+                  record.data as Record<string, unknown>,
+                  source,
+                  target,
+                );
+                await mdmsCreateWithSchemaWait(target, schemaCode, record.uniqueIdentifier, rewritten);
                 results.data.copied.push(`${schemaCode}/${record.uniqueIdentifier}`);
               }
             } catch (error) {
@@ -981,6 +1157,19 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           console.error(`[tenant_bootstrap] Schema "${schemaCode}" data copy skipped: ${schemaErr instanceof Error ? schemaErr.message : String(schemaErr)}`);
         }
       }
+
+      emitProgress({
+        phase: 'data:done',
+        message: `Data copied (${results.data.copied.length} new, ${results.data.skipped.length} existing, ${results.data.failed.length} failed)`,
+        data: {
+          copied: results.data.copied.length,
+          skipped: results.data.skipped.length,
+          failed: results.data.failed.length,
+        },
+        pct: 75,
+      });
+
+      emitProgress({ phase: 'admin:start', message: 'Provisioning ADMIN user on the new tenant', pct: 80 });
 
       // Step 4: Provision ADMIN user on target tenant
       // DIGIT auth scopes user lookup by tenantId — a user created under "pg" can't be found
@@ -1081,7 +1270,15 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         userProvisionError = msg;
       }
 
+      emitProgress({
+        phase: 'admin:done',
+        message: userProvisioned ? 'ADMIN user ready' : 'ADMIN user not provisioned',
+        data: { provisioned: !!userProvisioned, error: userProvisionError || undefined },
+        pct: 90,
+      });
+
       // Step 5: Copy workflow definitions
+      emitProgress({ phase: 'workflow:start', message: 'Copying PGR / business-service workflow definitions', pct: 92 });
       let workflowResults = { created: [] as string[], skipped: [] as string[], failed: [] as string[] };
       try {
         workflowResults = await copyWorkflowDefinitions(source, target);
@@ -1089,8 +1286,414 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         workflowResults.failed.push(`workflow copy error: ${err instanceof Error ? err.message : String(err)}`);
       }
 
+      // ────────────────────────────────────────────────────────────────
+      // Step 6: Copy ALL localization messages from source → target.
+      //
+      // Without this, every label the SPA renders via Digit.Utils.t()
+      // falls back to its raw key — banners show TENANT_TENANTS_PG,
+      // privacy footer shows ES_BY_CLICKING / ES_PRIVACY_POLICY, the
+      // city dropdown labels show TENANT_TENANTS_<UPPER(CODE)>, etc.
+      //
+      // Locales come from source's StateInfo.languages — typically
+      // en_IN plus whichever regional ones the source tenant ships.
+      // Falls back to ['en_IN'] if StateInfo is missing.
+      //
+      // No module filter: we pull everything. PGR alone is ~1.5K
+      // messages, common-masters ~2K, plus DSS/inbox/workflow rows.
+      // For a rich source tenant this can reach ~20K messages and
+      // take 30–60 s — that's the price of a usable UI on day 1.
+      // ────────────────────────────────────────────────────────────────
+      emitProgress({ phase: 'localizations:start', message: 'Copying localization messages (this can take a while for the full set)', pct: 95 });
+
+      const localizationResults: { locale: string; copied: number; failed: number; error?: string }[] = [];
+      const UPSERT_BATCH = 500;
+
+      // Discover locales — read source's StateInfo, pull `.languages[].value`.
+      // We query SOURCE so the unmodified StateInfo is available even though
+      // Step 3 has already rewritten it on TARGET.
+      let locales: string[] = ['en_IN'];
+      try {
+        const stateInfoRows = await digitApi.mdmsV2SearchRaw(source, 'common-masters.StateInfo', { limit: 5 });
+        const langs = (stateInfoRows[0]?.data as { languages?: { value?: string }[] } | undefined)?.languages || [];
+        const discovered = langs.map((l) => l.value).filter((v): v is string => typeof v === 'string' && v.length > 0);
+        if (discovered.length > 0) locales = Array.from(new Set(discovered));
+      } catch {
+        // StateInfo missing on source — keep en_IN default.
+      }
+
+      // Source tenants to scan for localization seed. Most DIGIT dumps
+      // concentrate the bulk of messages on the "rich" seed tenant
+      // (commonly `statea`/`statea.g`) while the chosen source root (often
+      // `pg`) carries only a thin StateInfo + branding subset. Union across
+      // the known rich roots so a `target=newroot source=pg` bootstrap
+      // still gets the full ~8K en_IN message set, not the 121 that live
+      // on `pg` alone. Deduplicate by code (first writer wins).
+      const localeSourceTenants = Array.from(
+        new Set([source, 'statea', 'statea.g', 'pg', 'pg.citest', 'ke', 'ke.nairobi']),
+      );
+
+      for (const locale of locales) {
+        emitProgress({
+          phase: 'localizations:locale',
+          message: `Pulling ${locale} messages (union of ${localeSourceTenants.length} source tenants)`,
+          data: { locale, sources: localeSourceTenants },
+        });
+        try {
+          // Union messages across all candidate source tenants. First code
+          // wins, so the explicit `source` arg always takes precedence.
+          const byCode = new Map<string, { code: string; message: string; module: string }>();
+          let perTenantRaw = 0;
+          for (const sourceTenant of localeSourceTenants) {
+            try {
+              const msgs = await digitApi.localizationSearch(sourceTenant, locale);
+              perTenantRaw += msgs.length;
+              for (const m of msgs) {
+                const rec = m as Record<string, unknown>;
+                const code = rec.code as string;
+                if (!code || byCode.has(code)) continue;
+                const message = rec.message as string;
+                if (typeof message !== 'string') continue;
+                byCode.set(code, {
+                  code,
+                  message,
+                  module: (rec.module as string) || 'rainmaker-common',
+                });
+              }
+            } catch {
+              // Tenant may not have this locale — that's expected. Skip.
+            }
+          }
+          const messages = Array.from(byCode.values());
+
+          if (messages.length === 0) {
+            localizationResults.push({ locale, copied: 0, failed: 0 });
+            continue;
+          }
+          emitProgress({
+            phase: 'localizations:locale_union',
+            message: `${locale}: union of ${localeSourceTenants.length} sources → ${messages.length} unique codes (${perTenantRaw} raw rows)`,
+            data: { locale, unique: messages.length, raw: perTenantRaw },
+          });
+
+          let copied = 0;
+          let failed = 0;
+          for (let off = 0; off < messages.length; off += UPSERT_BATCH) {
+            const batch = messages.slice(off, off + UPSERT_BATCH);
+            try {
+              await digitApi.localizationUpsert(target, locale, batch);
+              copied += batch.length;
+              emitProgress({
+                phase: 'localizations:batch',
+                message: `${locale}: upserted ${copied}/${messages.length}`,
+                data: { locale, copied, total: messages.length },
+              });
+            } catch (batchErr) {
+              const bm = batchErr instanceof Error ? batchErr.message : String(batchErr);
+              // Duplicates aren't real failures — egov-localization treats
+              // these as no-ops on re-runs. Other errors are surfaced.
+              if (/DUPLICATE|already exists|DuplicateMessageIdentity/i.test(bm)) {
+                copied += batch.length;
+              } else {
+                failed += batch.length;
+                console.error(`[tenant_bootstrap] localization upsert ${locale} batch ${off}: ${bm.slice(0, 200)}`);
+              }
+            }
+          }
+          localizationResults.push({ locale, copied, failed });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          localizationResults.push({ locale, copied: 0, failed: 0, error: msg.slice(0, 200) });
+        }
+      }
+
+      const localizationsCopied = localizationResults.reduce((a, r) => a + r.copied, 0);
+      const localizationsFailed = localizationResults.reduce((a, r) => a + r.failed, 0);
+      emitProgress({
+        phase: 'localizations:done',
+        message: `Localization copy: ${localizationsCopied} messages across ${locales.length} locale(s), ${localizationsFailed} failed`,
+        data: { copied: localizationsCopied, failed: localizationsFailed, locales: locales.length },
+        pct: 99,
+      });
+
+      // success now factors in workflow + localization failures too —
+      // schema/data-only success used to mask broken UI labels.
+      const overallSuccess =
+        results.schemas.failed.length === 0 &&
+        results.data.failed.length === 0 &&
+        workflowResults.failed.length === 0 &&
+        localizationsFailed === 0;
+
+      // ────────────────────────────────────────────────────────────────
+      // Step 7: Seed an HRMS Employee record for ADMIN.
+      //
+      // ADMIN can already log in (Step 4 created the eg_user row), but PGR's
+      // Assign action requires the assignee to also have an `eg_hrms_employee`
+      // row with a department + designation + jurisdiction. Without this,
+      // Newman complaints-demo on a freshly-bootstrapped tenant fails 7/13:
+      //   "The Department of the user with uuid: [<admin-uuid>] is not found"
+      //
+      // Pick the first available department + designation from `target`'s
+      // common-masters MDMS (just copied in Step 2). Non-fatal: bootstrap
+      // success doesn't depend on it; operator can manually create later.
+      // ────────────────────────────────────────────────────────────────
+      emitProgress({ phase: 'employee:start', message: 'Seeding HRMS Employee for ADMIN', pct: 99 });
+      const adminEmployee: { provisioned: boolean; code?: string; department?: string; designation?: string; error?: string } = {
+        provisioned: false,
+      };
+      if (userProvisioned) {
+        try {
+          const adminUserName = userProvisioned.username;
+          // Roles must be tagged with the STATE root (where
+          // ACCESSCONTROL-ROLES MDMS lives), not the leaf city — HRMS
+          // rejects "Invalid role" if roles are scoped to a city tenant.
+          const targetRoot = target.includes('.') ? target.split('.')[0] : target;
+
+          // MDMS v2 inheritance from root → city is unreliable on freshly
+          // bootstrapped tenants — search on city sometimes returns only
+          // city-scoped rows and misses root depts. Query BOTH and union
+          // by code so ADMIN's assignments cover every PGR dept.
+          const [cityDepts, rootDepts, cityDesigs, rootDesigs] = await Promise.all([
+            digitApi.mdmsV2SearchRaw(target, 'common-masters.Department', { limit: 100 }).catch(() => []),
+            target !== targetRoot
+              ? digitApi.mdmsV2SearchRaw(targetRoot, 'common-masters.Department', { limit: 100 }).catch(() => [])
+              : Promise.resolve([] as Record<string, unknown>[]),
+            digitApi.mdmsV2SearchRaw(target, 'common-masters.Designation', { limit: 100 }).catch(() => []),
+            target !== targetRoot
+              ? digitApi.mdmsV2SearchRaw(targetRoot, 'common-masters.Designation', { limit: 100 }).catch(() => [])
+              : Promise.resolve([] as Record<string, unknown>[]),
+          ]);
+
+          // City must have its own MDMS row for every dept it wants to
+          // assign — HRMS rejects "Invalid department" if the dept code
+          // isn't in the city's local Department schema. Backfill any
+          // root-only depts/desigs into the city before building the
+          // employee.
+          if (target !== targetRoot) {
+            const cityDeptCodes = new Set<string>();
+            for (const d of cityDepts) {
+              const c = ((d.uniqueIdentifier as string | undefined)
+                || ((d.data as Record<string, unknown> | undefined)?.code as string | undefined));
+              if (c) cityDeptCodes.add(c);
+            }
+            for (const d of rootDepts) {
+              const code = ((d.uniqueIdentifier as string | undefined)
+                || ((d.data as Record<string, unknown> | undefined)?.code as string | undefined));
+              if (!code || cityDeptCodes.has(code)) continue;
+              try {
+                const created = await digitApi.mdmsV2Create(target, 'common-masters.Department',
+                  code, (d.data as Record<string, unknown>) || { code });
+                (cityDepts as Record<string, unknown>[]).push(created as unknown as Record<string, unknown>);
+                cityDeptCodes.add(code);
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                if (!/DUPLICATE|already exists|unique/i.test(msg)) {
+                  console.error(`[tenant_bootstrap] city Department backfill ${code}: ${msg.slice(0, 200)}`);
+                }
+              }
+            }
+            const cityDesigCodes = new Set<string>();
+            for (const d of cityDesigs) {
+              const c = ((d.uniqueIdentifier as string | undefined)
+                || ((d.data as Record<string, unknown> | undefined)?.code as string | undefined));
+              if (c) cityDesigCodes.add(c);
+            }
+            for (const d of rootDesigs) {
+              const code = ((d.uniqueIdentifier as string | undefined)
+                || ((d.data as Record<string, unknown> | undefined)?.code as string | undefined));
+              if (!code || cityDesigCodes.has(code)) continue;
+              try {
+                const created = await digitApi.mdmsV2Create(target, 'common-masters.Designation',
+                  code, (d.data as Record<string, unknown>) || { code });
+                (cityDesigs as Record<string, unknown>[]).push(created as unknown as Record<string, unknown>);
+                cityDesigCodes.add(code);
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                if (!/DUPLICATE|already exists|unique/i.test(msg)) {
+                  console.error(`[tenant_bootstrap] city Designation backfill ${code}: ${msg.slice(0, 200)}`);
+                }
+              }
+            }
+          }
+
+          // For HRMS Employee on a city we want ONLY the city-scoped
+          // depts/desigs (post-backfill includes everything from root).
+          // For root bootstrap target===targetRoot so this is a no-op.
+          const depts = target === targetRoot ? [...cityDepts, ...rootDepts] : cityDepts;
+          const desigs = target === targetRoot ? [...cityDesigs, ...rootDesigs] : cityDesigs;
+          const deptCode = ((depts[0]?.uniqueIdentifier as string | undefined)
+            || ((depts[0]?.data as Record<string, unknown> | undefined)?.code as string | undefined)) as string | undefined;
+          const desigCode = ((desigs[0]?.uniqueIdentifier as string | undefined)
+            || ((desigs[0]?.data as Record<string, unknown> | undefined)?.code as string | undefined)) as string | undefined;
+
+          if (!deptCode || !desigCode) {
+            adminEmployee.error = `Cannot seed HRMS Employee: no department/designation found on "${target}". Re-check Step 2.`;
+          } else {
+            // Check if an HRMS Employee already exists for ADMIN on the target.
+            let alreadyExists = false;
+            try {
+              const existing = await digitApi.employeeSearch(target, { codes: [adminUserName], limit: 1 });
+              if (existing.length > 0) alreadyExists = true;
+            } catch { /* HRMS may 404 on fresh tenant; treat as not-found */ }
+
+            if (alreadyExists) {
+              adminEmployee.provisioned = true;
+              adminEmployee.code = adminUserName;
+              adminEmployee.department = deptCode;
+              adminEmployee.designation = desigCode;
+            } else {
+              // Look up the live user record so we can link (uuid + id) instead
+              // of triggering an HRMS-side user create (which would 409 on the
+              // already-existing eg_user from Step 4).
+              const targetUsers = await digitApi.userSearch(target, { userName: adminUserName, limit: 1 });
+              const adminRecord = targetUsers[0];
+
+              // HRMS validator filters out CITIZEN from MDMS roles before
+              // checking each employee role
+              // (HRMSConstants.HRMS_MDMS_AC_ROLES_FILTER = `[?(@.code != "CITIZEN")].code`).
+              // Including CITIZEN here trips ERR_HRMS_INVALID_ROLE.
+              const pgrRoles = ['EMPLOYEE', 'GRO', 'DGRO', 'PGR_LME', 'PGR_VIEWER', 'CSR', 'SUPERUSER'].map((c) => ({
+                code: c, name: c, tenantId: targetRoot,
+              }));
+              const userPayload: Record<string, unknown> = {
+                name: (adminRecord?.name as string) || 'Administrator',
+                userName: adminUserName,
+                mobileNumber: (adminRecord?.mobileNumber as string) || '9999999999',
+                emailId: (adminRecord?.emailId as string) || null,
+                gender: (adminRecord?.gender as string) || 'MALE',
+                type: 'EMPLOYEE',
+                active: true,
+                roles: pgrRoles,
+                tenantId: targetRoot,
+              };
+              if (adminRecord?.uuid) userPayload.uuid = adminRecord.uuid;
+              if (adminRecord?.id) userPayload.id = adminRecord.id;
+              if (!adminRecord?.uuid) {
+                userPayload.password = process.env.CRS_PASSWORD || 'eGov@123';
+              }
+
+              // PGR's validateDepartment checks that the assignee's HRMS
+              // Employee has an assignment in the complaint's required
+              // department (RAINMAKER-PGR.ServiceDefs.department). On a
+              // tenant with one employee (ADMIN), every complaint targeting
+              // a different department would fail with INVALID_ASSIGNMENT.
+              // Give ADMIN one assignment per available department so it
+              // qualifies as assignee for every complaint type. Dedup —
+              // city + root depts often overlap (DEPT_5 etc.).
+              const allDeptCodes = Array.from(new Set(
+                depts
+                  .map((d) => (d.uniqueIdentifier as string) || (d.data as Record<string, unknown> | undefined)?.code as string | undefined)
+                  .filter((c): c is string => typeof c === 'string' && c.length > 0),
+              ));
+              const deptList = allDeptCodes.length > 0 ? allDeptCodes : [deptCode];
+
+              const now = Date.now();
+              const dayMs = 86_400_000;
+              // HRMS rules:
+              //   - non-overlapping assignment windows
+              //   - every non-current assignment needs a toDate < current.fromDate
+              //   - every assignment fromDate >= dateOfAppointment
+              // Stagger N historical assignments into the past, then a
+              // current one starting now. Anchor dateOfAppointment to the
+              // earliest assignment so HRMS doesn't reject either edge.
+              const dateOfAppointment = now - deptList.length * dayMs;
+              const employee: Record<string, unknown> = {
+                tenantId: target,
+                employeeType: 'PERMANENT',
+                employeeStatus: 'EMPLOYED',
+                dateOfAppointment,
+                code: adminUserName,
+                IsActive: true,
+                user: userPayload,
+                assignments: deptList.map((dept, idx) => {
+                  if (idx === 0) {
+                    return {
+                      department: dept,
+                      designation: desigCode,
+                      fromDate: now,
+                      isCurrentAssignment: true,
+                      isHOD: false,
+                    };
+                  }
+                  // Historical: each occupies a 1-day window in the past,
+                  // ending strictly before `now`.
+                  const fromDate = now - (idx + 1) * dayMs;
+                  const toDate = now - idx * dayMs;
+                  return {
+                    department: dept,
+                    designation: desigCode,
+                    fromDate,
+                    toDate,
+                    isCurrentAssignment: false,
+                    isHOD: false,
+                  };
+                }),
+                jurisdictions: [{
+                  hierarchy: 'ADMIN',
+                  boundaryType: 'City',
+                  boundary: target,
+                  tenantId: target,
+                  isActive: true,
+                }],
+              };
+
+              const created = await digitApi.employeeCreate(target, [employee]);
+              if (created.length > 0) {
+                const c = created[0];
+                adminEmployee.provisioned = true;
+                adminEmployee.code = (c.code as string | undefined) || adminUserName;
+                adminEmployee.department = deptList.join(',');
+                adminEmployee.designation = desigCode;
+
+                // HRMS doesn't reliably persist the user password — reset via user-service.
+                const u = c.user as Record<string, unknown> | undefined;
+                if (u?.uuid) {
+                  try {
+                    const users = await digitApi.userSearch(target, { uuid: [u.uuid as string], limit: 1 });
+                    if (users.length > 0) {
+                      await digitApi.userUpdate({ ...users[0], password: process.env.CRS_PASSWORD || 'eGov@123' });
+                    }
+                  } catch { /* non-fatal */ }
+                }
+              }
+            }
+          }
+        } catch (err) {
+          adminEmployee.error = err instanceof Error ? err.message : String(err);
+        }
+      } else {
+        adminEmployee.error = 'Skipped: ADMIN user provisioning failed earlier in this bootstrap';
+      }
+      emitProgress({
+        phase: 'employee:done',
+        message: adminEmployee.provisioned
+          ? `ADMIN HRMS Employee seeded (dept=${adminEmployee.department}, desig=${adminEmployee.designation})`
+          : `HRMS Employee not seeded: ${adminEmployee.error}`,
+        data: adminEmployee,
+        pct: 100,
+      });
+
+      emitProgress({
+        phase: 'bootstrap:done',
+        message: overallSuccess ? 'Tenant bootstrap complete' : 'Tenant bootstrap completed with failures (see results.*.failed)',
+        data: {
+          success: overallSuccess,
+          summary: {
+            schemas_copied: results.schemas.copied.length,
+            schemas_failed: results.schemas.failed.length,
+            data_copied: results.data.copied.length,
+            data_failed: results.data.failed.length,
+            workflows_created: workflowResults.created.length,
+            workflows_failed: workflowResults.failed.length,
+            localizations_copied: localizationsCopied,
+            localizations_failed: localizationsFailed,
+            admin_employee_provisioned: adminEmployee.provisioned,
+          },
+        },
+        pct: 100,
+      });
+
       return JSON.stringify({
-        success: results.schemas.failed.length === 0 && results.data.failed.length === 0,
+        success: overallSuccess,
         source,
         target,
         summary: {
@@ -1103,7 +1706,13 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           workflows_created: workflowResults.created.length,
           workflows_skipped: workflowResults.skipped.length,
           workflows_failed: workflowResults.failed.length,
+          localizations_copied: localizationsCopied,
+          localizations_failed: localizationsFailed,
+          locales_seen: locales.length,
+          admin_employee_provisioned: adminEmployee.provisioned,
         },
+        localizations: localizationResults,
+        adminEmployee,
         ...(userProvisioned && {
           adminUser: {
             provisioned: true,
@@ -1502,13 +2111,156 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         steps.boundaries = boundaryResult;
       }
 
+      // Step 6: Seed an HRMS admin employee linked to the ADMIN user.
+      //
+      // Why this step exists: tenant_bootstrap + steps 1–3 above produce a
+      // tenant whose ADMIN user can log in and file complaints, but PGR's
+      // Assign action requires an assignee with an `eg_hrms_employee` row
+      // (tied to a department + designation + jurisdiction). Without it,
+      // every assign-onward workflow step returns 400. Newman's full
+      // complaints-demo suite fails 7/13 on a fresh tenant without this.
+      //
+      // We pick the first available department + designation from the root's
+      // common-masters MDMS — those rows were just copied by tenant_bootstrap
+      // so they're guaranteed to exist. Failures here are non-fatal: city
+      // creation already succeeded, the operator can call employee_create
+      // explicitly with a different department later.
+      const employeeResult: { provisioned: boolean; code?: string; department?: string; designation?: string; error?: string } = {
+        provisioned: false,
+      };
+      try {
+        const auth = digitApi.getAuthInfo();
+        const adminUserName = auth.user?.userName || process.env.CRS_USERNAME || 'ADMIN';
+
+        const [depts, desigs] = await Promise.all([
+          digitApi.mdmsV2SearchRaw(root, 'common-masters.Department', { limit: 100 }),
+          digitApi.mdmsV2SearchRaw(root, 'common-masters.Designation', { limit: 100 }),
+        ]);
+        const deptCode = depts[0]?.uniqueIdentifier
+          || (depts[0]?.data as Record<string, unknown> | undefined)?.code as string | undefined;
+        const desigCode = desigs[0]?.uniqueIdentifier
+          || (desigs[0]?.data as Record<string, unknown> | undefined)?.code as string | undefined;
+
+        if (!deptCode || !desigCode) {
+          employeeResult.error = `Cannot seed HRMS employee: department/designation missing on root "${root}". Re-run tenant_bootstrap.`;
+        } else {
+          // Look up the admin user on the city so we get the right mobile
+          // number / uuid / email to attach the employee record to.
+          const cityUsers = await digitApi.userSearch(tenantId, { userName: adminUserName, limit: 1 });
+          const adminOnCity = cityUsers[0];
+
+          // Check if an HRMS employee already exists for this user. The user
+          // search returns the user; we then probe HRMS to avoid duplicate
+          // create attempts on idempotent re-runs.
+          let alreadyExists = false;
+          try {
+            const existingEmployees = await digitApi.employeeSearch(tenantId, {
+              codes: [adminUserName],
+              limit: 1,
+            });
+            if (existingEmployees.length > 0) alreadyExists = true;
+          } catch { /* HRMS search may 404 on a fresh tenant; treat as not-found */ }
+
+          if (alreadyExists) {
+            employeeResult.provisioned = true;
+            employeeResult.code = adminUserName;
+            employeeResult.department = deptCode;
+            employeeResult.designation = desigCode;
+          } else {
+            // Step 3 already provisioned the ADMIN user (dual-scoped on root +
+            // city). HRMS's employee_create normally also creates a user; we
+            // need to *link* to the existing one instead so we don't trip the
+            // "User already exists" duplicate-check. Search for the live user
+            // record (with uuid) and inline it onto the employee payload.
+            const cityAdminRecord = adminOnCity
+              ?? (await digitApi.userSearch(root, { userName: adminUserName, limit: 1 }))[0]
+              ?? null;
+
+            // Roles must be scoped to the root tenant (where ACCESSCONTROL-ROLES
+            // lives). Includes everything the PGR workflow gates on.
+            const pgrRoles = ['EMPLOYEE', 'GRO', 'DGRO', 'PGR_LME', 'PGR_VIEWER', 'CSR', 'SUPERUSER', 'CITIZEN'].map((c) => ({
+              code: c, name: c, tenantId: root,
+            }));
+
+            // Build the user inline. When we have an existing user we pass
+            // the uuid + id so HRMS recognises this as a link, not a create.
+            const userPayload: Record<string, unknown> = {
+              name: (cityAdminRecord?.name as string) || 'Administrator',
+              userName: adminUserName,
+              mobileNumber: (cityAdminRecord?.mobileNumber as string) || '9999999999',
+              emailId: (cityAdminRecord?.emailId as string) || null,
+              gender: (cityAdminRecord?.gender as string) || 'MALE',
+              type: 'EMPLOYEE',
+              active: true,
+              roles: pgrRoles,
+              tenantId: root,
+            };
+            if (cityAdminRecord?.uuid) userPayload.uuid = cityAdminRecord.uuid;
+            if (cityAdminRecord?.id) userPayload.id = cityAdminRecord.id;
+            // Only set password on a fresh user — sending it for an existing
+            // user is what trips DuplicateUserName on some HRMS builds.
+            if (!cityAdminRecord?.uuid) {
+              userPayload.password = process.env.CRS_PASSWORD || 'eGov@123';
+            }
+
+            const now = Date.now();
+            const employee: Record<string, unknown> = {
+              tenantId,
+              employeeType: 'PERMANENT',
+              employeeStatus: 'EMPLOYED',
+              dateOfAppointment: now,
+              code: adminUserName,
+              IsActive: true,
+              user: userPayload,
+              assignments: [{
+                department: deptCode,
+                designation: desigCode,
+                fromDate: now,
+                isCurrentAssignment: true,
+                isHOD: false,
+              }],
+              jurisdictions: [{
+                hierarchy: 'ADMIN',
+                boundaryType: 'City',
+                boundary: tenantId,
+                tenantId,
+                isActive: true,
+              }],
+            };
+
+            const created = await digitApi.employeeCreate(tenantId, [employee]);
+            if (created.length > 0) {
+              const c = created[0];
+              employeeResult.provisioned = true;
+              employeeResult.code = c.code as string | undefined;
+              employeeResult.department = deptCode;
+              employeeResult.designation = desigCode;
+
+              // HRMS doesn't reliably set the user password — reset via user-service so login works.
+              const user = c.user as Record<string, unknown> | undefined;
+              if (user?.uuid) {
+                try {
+                  const users = await digitApi.userSearch(root, { uuid: [user.uuid as string], limit: 1 });
+                  if (users.length > 0) {
+                    await digitApi.userUpdate({ ...users[0], password: process.env.CRS_PASSWORD || 'eGov@123' });
+                  }
+                } catch { /* non-fatal */ }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        employeeResult.error = err instanceof Error ? err.message : String(err);
+      }
+      steps.adminEmployee = employeeResult;
+
       return JSON.stringify({
         success: true,
         cityTenant: tenantId,
         root,
         steps,
         nextSteps: [
-          `Create employees: employee_create with tenant_id="${tenantId}"`,
+          `Create more employees: employee_create with tenant_id="${tenantId}"`,
           `Verify setup: validate_complaint_types, validate_employees with tenant_id="${tenantId}"`,
           `Create complaints: pgr_create with tenant_id="${tenantId}"`,
         ],
@@ -1523,16 +2275,18 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
     category: 'mdms',
     risk: 'write',
     description:
-      'Clean up a tenant by soft-deleting all MDMS data (isActive=false) and deactivating users. ' +
+      'Clean up a tenant by soft-deleting MDMS records OWNED by that tenant (isActive=false) ' +
+      'and deactivating users. Records inherited from parent tenants are left untouched — only ' +
+      'records whose own record.tenantId equals the passed tenant_id are deactivated. ' +
       'Follows the dataloader pattern: MDMS records are deactivated via the v2 _update API, not hard-deleted. ' +
       'Schema definitions are left in place (harmless without data). ' +
-      'Use this to tear down test tenants created by tenant_bootstrap.',
+      'Use this to tear down test tenants created by tenant_bootstrap or city_setup_from_xlsx.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         tenant_id: {
           type: 'string',
-          description: 'Tenant ID to clean up (e.g. "testroot"). WARNING: This deactivates ALL MDMS data for this tenant.',
+          description: 'Tenant ID whose OWN records to deactivate (e.g. "ke.poc-mzpt"). Inherited records are left alone.',
         },
         deactivate_users: {
           type: 'boolean',
@@ -1541,7 +2295,12 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
         schemas: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Optional: only clean up specific schema codes. If omitted, cleans ALL schemas.',
+          description: 'Optional: only touch specific schema codes. If omitted, all schemas owned by tenant_id.',
+        },
+        reactivate: {
+          type: 'boolean',
+          description: 'Recovery mode: instead of deactivating, set isActive=true on the matching records. ' +
+            'Use this to undo a prior cleanup. Default: false (deactivate).',
         },
       },
       required: ['tenant_id'],
@@ -1554,11 +2313,21 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       const tenantId = args.tenant_id as string;
       const deactivateUsers = (args.deactivate_users as boolean) ?? true;
       const schemaFilter = args.schemas as string[] | undefined;
+      const reactivate = (args.reactivate as boolean) ?? false;
+      const targetActive = reactivate; // true=undo, false=deactivate
+      const verb = reactivate ? 'reactivate' : 'deactivate';
 
       const results = {
         mdms: { deleted: 0, skipped: 0, failed: 0, schemas: {} as Record<string, number> },
         users: { deactivated: 0, failed: 0 },
       };
+
+      emitProgress({
+        phase: 'cleanup:start',
+        message: `Cleaning up tenant "${tenantId}"`,
+        data: { tenant_id: tenantId, deactivate_users: deactivateUsers, schemas: schemaFilter ?? null },
+        pct: 0,
+      });
 
       // Step 1: Search all MDMS data for the tenant
       // Paginate through all records (MDMS search is capped at limit per call)
@@ -1570,6 +2339,7 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
       let offset = 0;
       const pageSize = 500;
 
+      emitProgress({ phase: 'mdms:search:start', message: 'Listing MDMS records to deactivate', pct: 5 });
       while (true) {
         const schemaCode = schemaFilter && schemaFilter.length === 1 ? schemaFilter[0] : '';
         const data = await digitApi.mdmsV2SearchRaw(tenantId, schemaCode, { limit: pageSize, offset });
@@ -1584,59 +2354,121 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           isActive: r.isActive,
           auditDetails: r.auditDetails as Record<string, unknown> | undefined,
         })));
+        emitProgress({
+          phase: 'mdms:search:page',
+          message: `Fetched ${allRecords.length} records so far`,
+          data: { fetched: allRecords.length, offset },
+        });
         if (data.length < pageSize) break;
         offset += pageSize;
       }
 
+      // CRITICAL: MDMS v2 search at a city tenant returns records inherited
+      // from parent tenants (with their actual home tenantId on the record).
+      // We must NOT deactivate those — they don't belong to the tenant we're
+      // cleaning up. Only touch records whose record.tenantId exactly matches
+      // the cleanup target.
+      const inheritedSkipped = allRecords.length - allRecords.filter((r) => r.tenantId === tenantId).length;
+      const ownedRecords = allRecords.filter((r) => r.tenantId === tenantId);
+
       // Filter by schemas if multiple were specified
       const filteredRecords = schemaFilter && schemaFilter.length > 1
-        ? allRecords.filter((r) => schemaFilter.includes(r.schemaCode))
-        : allRecords;
+        ? ownedRecords.filter((r) => schemaFilter.includes(r.schemaCode))
+        : ownedRecords;
 
-      // Step 2: Soft-delete each active record
+      emitProgress({
+        phase: `mdms:${verb}:start`,
+        message: `${reactivate ? 'Reactivating' : 'Deactivating'} ${filteredRecords.length} MDMS records`,
+        data: { total: filteredRecords.length },
+        pct: 10,
+      });
+
+      // Step 2: Flip isActive on each candidate record.
+      // - deactivate mode: skip already-inactive, flip active→inactive
+      // - reactivate mode: skip already-active, flip inactive→active
+      let processed = 0;
+      const reportEvery = Math.max(25, Math.floor(filteredRecords.length / 20) || 25);
       for (const record of filteredRecords) {
-        if (!record.isActive) {
+        if (record.isActive === targetActive) {
           results.mdms.skipped++;
-          continue;
-        }
-
-        try {
-          await digitApi.mdmsV2Update(
-            record as Parameters<typeof digitApi.mdmsV2Update>[0],
-            false
-          );
-          results.mdms.deleted++;
-          results.mdms.schemas[record.schemaCode] = (results.mdms.schemas[record.schemaCode] || 0) + 1;
-        } catch (delErr) {
-          console.error(`[tenant_cleanup] Failed to deactivate ${record.schemaCode}/${record.uniqueIdentifier}: ${delErr instanceof Error ? delErr.message : String(delErr)}`);
-          results.mdms.failed++;
-        }
-      }
-
-      // Step 3: Deactivate users on this tenant
-      if (deactivateUsers) {
-        try {
-          const users = await digitApi.userSearch(tenantId, { limit: 100 });
-          for (const user of users) {
-            if (!(user.active as boolean)) continue;
-            try {
-              await digitApi.userUpdate({ ...user, active: false });
-              results.users.deactivated++;
-            } catch (userErr) {
-              console.error(`[tenant_cleanup] Failed to deactivate user ${user.userName}: ${userErr instanceof Error ? userErr.message : String(userErr)}`);
-              results.users.failed++;
-            }
+        } else {
+          try {
+            await digitApi.mdmsV2Update(
+              record as Parameters<typeof digitApi.mdmsV2Update>[0],
+              targetActive
+            );
+            results.mdms.deleted++;
+            results.mdms.schemas[record.schemaCode] = (results.mdms.schemas[record.schemaCode] || 0) + 1;
+          } catch (delErr) {
+            console.error(`[tenant_cleanup] Failed to ${verb} ${record.schemaCode}/${record.uniqueIdentifier}: ${delErr instanceof Error ? delErr.message : String(delErr)}`);
+            results.mdms.failed++;
           }
-        } catch (userSearchErr) {
-          console.error(`[tenant_cleanup] User search failed for "${tenantId}": ${userSearchErr instanceof Error ? userSearchErr.message : String(userSearchErr)}`);
+        }
+        processed++;
+        if (processed % reportEvery === 0 || processed === filteredRecords.length) {
+          const span = filteredRecords.length || 1;
+          emitProgress({
+            phase: `mdms:${verb}:progress`,
+            message: `${processed}/${filteredRecords.length} processed (changed=${results.mdms.deleted}, skipped=${results.mdms.skipped}, failed=${results.mdms.failed})`,
+            data: { processed, total: filteredRecords.length, ...results.mdms },
+            pct: 10 + Math.floor((processed / span) * 75),
+          });
         }
       }
+
+      // Step 3: Flip users on this tenant in the same direction.
+      // egov-user's _search 500s if you don't narrow by user_type, so we
+      // iterate the three known types and union the results, deduping by
+      // uuid. Per-type errors are surfaced in the response instead of being
+      // silently swallowed.
+      if (deactivateUsers) {
+        emitProgress({ phase: `users:${verb}:start`, message: `${reactivate ? 'Reactivating' : 'Deactivating'} users on "${tenantId}"`, pct: 88 });
+        const seen = new Set<string>();
+        const collected: Record<string, unknown>[] = [];
+        const userSearchErrors: string[] = [];
+        for (const userType of ['EMPLOYEE', 'CITIZEN', 'SYSTEM']) {
+          try {
+            const batch = await digitApi.userSearch(tenantId, { limit: 100, userType });
+            for (const u of batch) {
+              const uuid = (u.uuid as string | undefined) || `${u.userName}:${u.type}`;
+              if (seen.has(uuid)) continue;
+              seen.add(uuid);
+              collected.push(u);
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(`[tenant_cleanup] User search ${userType} failed for "${tenantId}": ${msg}`);
+            userSearchErrors.push(`${userType}: ${msg}`);
+          }
+        }
+        for (const user of collected) {
+          if ((user.active as boolean) === targetActive) continue;
+          try {
+            await digitApi.userUpdate({ ...user, active: targetActive });
+            results.users.deactivated++;
+          } catch (userErr) {
+            console.error(`[tenant_cleanup] Failed to ${verb} user ${user.userName}: ${userErr instanceof Error ? userErr.message : String(userErr)}`);
+            results.users.failed++;
+          }
+        }
+        if (userSearchErrors.length) {
+          (results.users as Record<string, unknown>).search_errors = userSearchErrors;
+        }
+      }
+
+      emitProgress({
+        phase: 'cleanup:done',
+        message: `${reactivate ? 'Reactivation' : 'Cleanup'} complete: ${results.mdms.deleted} records ${verb}d, ${results.users.deactivated} users ${verb}d`,
+        data: { mdms: results.mdms, users: results.users },
+        pct: 100,
+      });
 
       return JSON.stringify({
         success: results.mdms.failed === 0 && results.users.failed === 0,
         tenantId,
         summary: {
-          mdms_records_found: filteredRecords.length,
+          mdms_records_owned: filteredRecords.length,
+          mdms_inherited_left_alone: inheritedSkipped,
           mdms_deleted: results.mdms.deleted,
           mdms_already_inactive: results.mdms.skipped,
           mdms_failed: results.mdms.failed,
@@ -1644,7 +2476,9 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
           users_failed: results.users.failed,
         },
         schemas_affected: results.mdms.schemas,
-        note: 'MDMS records soft-deleted (isActive=false). Schema definitions are left in place. Users deactivated.',
+        note: 'Only records whose tenantId exactly matches were deactivated. ' +
+          'Records inherited from parent tenants were left untouched. ' +
+          'Schema definitions are left in place.',
       }, null, 2);
     },
   } satisfies ToolMetadata);
@@ -1800,6 +2634,521 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
 
         return JSON.stringify({ success: false, error: msg, hint }, null, 2);
       }
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // mdms_update — generic single-record patch
+  // ──────────────────────────────────────────
+  // Wraps digitApi.mdmsV2Update with the search-for-audit-details handshake
+  // the v2 _update endpoint requires. Pass exactly one of `data` (full
+  // replacement of the record's data block) or `patch` (shallow merge over
+  // the existing data fields). Use `is_active` to flip active/inactive
+  // independently of either; omit to keep the current value.
+  registry.register({
+    name: 'mdms_update',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'write',
+    description:
+      'Update an existing MDMS v2 record. Fetches the current record (for id + auditDetails), ' +
+      'applies the requested change, and submits to _update. Pass `data` for full data replacement, ' +
+      '`patch` for shallow merge, and/or `is_active` to flip active state.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: {
+          type: 'string',
+          description: 'Tenant ID the record lives on (must match record.tenantId exactly — inherited records cannot be updated from a child tenant).',
+        },
+        schema_code: { type: 'string', description: 'MDMS schema code, e.g. "common-masters.UserValidation".' },
+        unique_identifier: { type: 'string', description: 'The record\'s uniqueIdentifier.' },
+        data: { type: 'object', description: 'Optional. Full replacement for the record\'s `data` block. Mutually exclusive with `patch`.' },
+        patch: { type: 'object', description: 'Optional. Top-level keys to merge into existing data. Mutually exclusive with `data`.' },
+        is_active: { type: 'boolean', description: 'Optional. Set true/false to flip active state. Omit to keep current.' },
+      },
+      required: ['tenant_id', 'schema_code', 'unique_identifier'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.schema_code as string, 'schema_code');
+      validateResourceId(args.unique_identifier as string, 'unique_identifier');
+
+      if (args.data && args.patch) {
+        return JSON.stringify({ success: false, error: '`data` and `patch` are mutually exclusive — pass one or the other.' }, null, 2);
+      }
+      if (!args.data && !args.patch && args.is_active === undefined) {
+        return JSON.stringify({ success: false, error: 'Nothing to update. Provide `data`, `patch`, or `is_active`.' }, null, 2);
+      }
+
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const schemaCode = args.schema_code as string;
+      const uniqueIdentifier = args.unique_identifier as string;
+
+      // Fetch existing record. Must search at the tenant the record actually
+      // lives on — MDMS won't let you _update an inherited record under a
+      // child tenant's scope.
+      const existing = await digitApi.mdmsV2SearchRaw(tenantId, schemaCode, {
+        uniqueIdentifiers: [uniqueIdentifier],
+        limit: 1,
+      });
+      if (existing.length === 0) {
+        return JSON.stringify({
+          success: false,
+          error: `Record not found: ${schemaCode}/${uniqueIdentifier} at tenant "${tenantId}".`,
+          hint: 'mdms_update only operates on records owned by the given tenant. If the record was inherited from a parent tenant, call mdms_update on the parent.',
+        }, null, 2);
+      }
+      const record = existing[0];
+
+      const newData =
+        args.data !== undefined
+          ? (args.data as Record<string, unknown>)
+          : args.patch !== undefined
+            ? { ...record.data, ...(args.patch as Record<string, unknown>) }
+            : record.data;
+
+      const newActive = args.is_active === undefined ? record.isActive : (args.is_active as boolean);
+
+      try {
+        const updated = await digitApi.mdmsV2Update(
+          { ...record, data: newData },
+          newActive,
+        );
+        return JSON.stringify({
+          success: true,
+          message: `Updated ${schemaCode}/${uniqueIdentifier}`,
+          record: {
+            id: updated.id,
+            tenantId: updated.tenantId,
+            schemaCode: updated.schemaCode,
+            uniqueIdentifier: updated.uniqueIdentifier,
+            data: updated.data,
+            isActive: updated.isActive,
+          },
+        }, null, 2);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return JSON.stringify({ success: false, error: msg }, null, 2);
+      }
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // mdms_repair_identity — bulk rewrite identity fields
+  // ──────────────────────────────────────────
+  // Maintenance tool for SQL-imported tenants whose records carry stale
+  // identity fields (e.g. data.tenantId="pg" on records that now live at
+  // "ke"). tenant_bootstrap's create-time identity rewrite doesn't cover
+  // this case — it only applies when copying records from source → target.
+  registry.register({
+    name: 'mdms_repair_identity',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'write',
+    description:
+      'Bulk-rewrite an identity field across all records of a schema at one tenant. ' +
+      'For each matching record, sets data.<field> to `to_value` and (optionally) reactivates. ' +
+      'Use this when records carry a stale tenant id from a SQL-dump import that predates ' +
+      'tenant_bootstrap\'s identity rewriting.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: { type: 'string', description: 'Tenant the records live on (their record.tenantId).' },
+        schema_code: { type: 'string', description: 'MDMS schema to scan.' },
+        field: { type: 'string', description: 'Identity field inside data to rewrite (default: "tenantId").' },
+        from_value: { type: 'string', description: 'Existing value to look for. If omitted, every record whose `field` ≠ `to_value` is repaired.' },
+        to_value: { type: 'string', description: 'Value to write (e.g. the correct tenant id).' },
+        reactivate: { type: 'boolean', description: 'Also flip isActive=true on repaired records. Default true.' },
+        dry_run: { type: 'boolean', description: 'If true, list what would be changed without writing.' },
+      },
+      required: ['tenant_id', 'schema_code', 'to_value'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.schema_code as string, 'schema_code');
+
+      await ensureAuthenticated();
+
+      const tenantId = args.tenant_id as string;
+      const schemaCode = args.schema_code as string;
+      const field = (args.field as string | undefined) || 'tenantId';
+      const fromValue = args.from_value as string | undefined;
+      const toValue = args.to_value as string;
+      const reactivate = (args.reactivate as boolean | undefined) ?? true;
+      const dryRun = args.dry_run === true;
+
+      type MdmsRow = Awaited<ReturnType<typeof digitApi.mdmsV2SearchRaw>>[number];
+      const records: MdmsRow[] = [];
+      let offset = 0;
+      const pageSize = 500;
+      while (true) {
+        const page = await digitApi.mdmsV2SearchRaw(tenantId, schemaCode, { limit: pageSize, offset });
+        if (page.length === 0) break;
+        // Only repair records actually owned at this tenant — inherited ones live on the parent.
+        for (const r of page) {
+          if (r.tenantId !== tenantId) continue;
+          records.push(r);
+        }
+        if (page.length < pageSize) break;
+        offset += pageSize;
+      }
+
+      const candidates = records.filter((r) => {
+        const current = r.data?.[field];
+        if (fromValue !== undefined) return current === fromValue;
+        return current !== undefined && current !== toValue;
+      });
+
+      if (dryRun) {
+        return JSON.stringify({
+          success: true,
+          dry_run: true,
+          tenant_id: tenantId,
+          schema_code: schemaCode,
+          scanned: records.length,
+          to_repair: candidates.length,
+          sample: candidates.slice(0, 5).map((r) => ({
+            uniqueIdentifier: r.uniqueIdentifier,
+            current: r.data?.[field],
+            isActive: r.isActive,
+          })),
+        }, null, 2);
+      }
+
+      let repaired = 0;
+      let failed = 0;
+      const failures: string[] = [];
+      for (const r of candidates) {
+        const newData = { ...r.data, [field]: toValue };
+        const targetActive = reactivate ? true : r.isActive;
+        try {
+          await digitApi.mdmsV2Update({ ...r, data: newData }, targetActive);
+          repaired++;
+        } catch (err) {
+          failed++;
+          if (failures.length < 10) {
+            failures.push(`${r.uniqueIdentifier}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+
+      return JSON.stringify({
+        success: failed === 0,
+        tenant_id: tenantId,
+        schema_code: schemaCode,
+        scanned: records.length,
+        repaired,
+        failed,
+        failures,
+      }, null, 2);
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // boundary_entity_search — list entities by tenant + codes
+  // ──────────────────────────────────────────
+  // Thin wrapper around boundary-service /boundary/_search, independent of
+  // egov-bndry-mgmnt (which 404s on tenants without bulk-mgmt history).
+  // Used by tests/verifiers that need to assert entity presence + scoping.
+  registry.register({
+    name: 'boundary_entity_search',
+    group: 'boundary',
+    category: 'boundary-mgmt',
+    risk: 'read',
+    description:
+      'Search boundary entities at a tenant. Direct call to boundary-service /boundary/_search, ' +
+      'independent of egov-bndry-mgmnt. Returns the raw entity rows (id, tenantId, code, geometry, auditDetails).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: { type: 'string', description: 'Tenant ID to search at.' },
+        codes: { type: 'array', items: { type: 'string' }, description: 'Optional. Boundary entity codes to filter.' },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      await ensureAuthenticated();
+      const tenantId = args.tenant_id as string;
+      const codes = (args.codes as string[] | undefined) ?? [];
+      const entities = await digitApi.boundarySearch(tenantId, undefined, { codes });
+      return JSON.stringify({
+        success: true,
+        tenantId,
+        count: entities.length,
+        entities,
+      }, null, 2);
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // boundary_entity_exists — primitive existence probe
+  // ──────────────────────────────────────────
+  // Per-code existence check. Cheap predicate for verify-before-write
+  // flows in city_setup_from_xlsx and similar — avoids the race that
+  // boundary-relationships/_create exposes when entity-batches are still
+  // in Kafka.
+  registry.register({
+    name: 'boundary_entity_exists',
+    group: 'boundary',
+    category: 'boundary-mgmt',
+    risk: 'read',
+    description:
+      'Return {exists: boolean} for a single boundary entity code at a tenant. ' +
+      'Used as a verify-before-write probe to dodge the boundary-service Kafka/cache race.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: { type: 'string' },
+        code: { type: 'string' },
+      },
+      required: ['tenant_id', 'code'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      validateResourceId(args.code as string, 'code');
+      await ensureAuthenticated();
+      const tenantId = args.tenant_id as string;
+      const code = args.code as string;
+      try {
+        const entities = await digitApi.boundarySearch(tenantId, undefined, { codes: [code] });
+        const hit = (entities as Record<string, unknown>[]).find((e) => e.code === code);
+        return JSON.stringify({
+          success: true,
+          tenantId,
+          code,
+          exists: Boolean(hit),
+          entity: hit ?? null,
+        }, null, 2);
+      } catch (err) {
+        return JSON.stringify({
+          success: false,
+          tenantId,
+          code,
+          exists: false,
+          error: err instanceof Error ? err.message : String(err),
+        }, null, 2);
+      }
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // validate_boundary_hierarchy — assert level sequence + scoping
+  // ──────────────────────────────────────────
+  // Consolidates the boundary-hierarchy assertion that test suites and
+  // verifiers were rolling by hand: "the hierarchy named X at tenant Y
+  // has these N levels in order, owned by Y (not inherited)."
+  registry.register({
+    name: 'validate_boundary_hierarchy',
+    group: 'boundary',
+    category: 'boundary-mgmt',
+    risk: 'read',
+    description:
+      'Assert that a boundary hierarchy with the given `hierarchy_type` exists at `tenant_id` ' +
+      'with the expected level sequence (and is owned by that tenant, not inherited). ' +
+      'Returns a structured diff: missing levels, extra levels, mis-ordered levels, owner mismatch.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: { type: 'string', description: 'Tenant ID to look up the hierarchy at.' },
+        hierarchy_type: { type: 'string', description: 'Expected hierarchyType code, e.g. "ADMIN".' },
+        expected_levels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Expected boundary-type level names in topo order (root first).',
+        },
+      },
+      required: ['tenant_id', 'hierarchy_type', 'expected_levels'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      await ensureAuthenticated();
+      const tenantId = args.tenant_id as string;
+      const hierarchyType = args.hierarchy_type as string;
+      const expectedLevels = args.expected_levels as string[];
+
+      const hierarchies = await digitApi.boundaryHierarchySearch(tenantId, hierarchyType);
+      if (hierarchies.length === 0) {
+        return JSON.stringify({
+          success: true,
+          valid: false,
+          tenantId,
+          hierarchy_type: hierarchyType,
+          reason: `No hierarchy named "${hierarchyType}" found at tenant "${tenantId}".`,
+        }, null, 2);
+      }
+
+      // Pick the one whose tenantId matches exactly (defensive against
+      // future cases where search returns inherited matches).
+      const owned = (hierarchies as Record<string, unknown>[]).find((h) => h.tenantId === tenantId);
+      const h = (owned ?? hierarchies[0]) as Record<string, unknown>;
+      const ownerMatches = h.tenantId === tenantId;
+      const levels = (h.boundaryHierarchy as Array<{ boundaryType: string }> | undefined) ?? [];
+      const actualLevels = levels.map((l) => l.boundaryType);
+
+      const missing = expectedLevels.filter((l) => !actualLevels.includes(l));
+      const extra = actualLevels.filter((l) => !expectedLevels.includes(l));
+      const orderMatches = JSON.stringify(actualLevels) === JSON.stringify(expectedLevels);
+      const valid = ownerMatches && missing.length === 0 && extra.length === 0 && orderMatches;
+
+      return JSON.stringify({
+        success: true,
+        valid,
+        tenantId,
+        hierarchy_type: hierarchyType,
+        owner_actual: h.tenantId,
+        owner_matches: ownerMatches,
+        expected_levels: expectedLevels,
+        actual_levels: actualLevels,
+        missing,
+        extra,
+        order_matches: orderMatches,
+      }, null, 2);
+    },
+  } satisfies ToolMetadata);
+
+  // ──────────────────────────────────────────
+  // tenant_destroy — true inverse of city_setup_from_xlsx
+  // ──────────────────────────────────────────
+  // tenant_cleanup correctly leaves inherited records alone, but
+  // city_setup_from_xlsx writes some city-relevant records (depts, desigs,
+  // complaint types, the tenant.tenants registration itself) AT THE ROOT
+  // — so a city-level cleanup can't reach them. tenant_destroy adds a
+  // best-effort second pass: given the city's tenant_id and (optionally)
+  // explicit codes to remove at root, it deactivates those root-level
+  // records too, then runs the standard city-level cleanup.
+  registry.register({
+    name: 'tenant_destroy',
+    group: 'mdms',
+    category: 'mdms',
+    risk: 'write',
+    description:
+      'Tear down a city tenant that was created with city_setup_from_xlsx. ' +
+      'Runs the standard city-level cleanup (deactivates city-owned records + users) ' +
+      'AND deactivates the named root-level records (depts/desigs/complaint types/tenant.tenants entry) ' +
+      'that city_setup_from_xlsx writes outside the city scope.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        tenant_id: { type: 'string', description: 'The city tenant_id to destroy, e.g. "ke.maputopoc".' },
+        department_codes: { type: 'array', items: { type: 'string' }, description: 'Department codes (at root) to deactivate. From the masters XLSX.' },
+        designation_codes: { type: 'array', items: { type: 'string' }, description: 'Designation codes (at root) to deactivate.' },
+        complaint_type_codes: { type: 'array', items: { type: 'string' }, description: 'Complaint type (RAINMAKER-PGR.ServiceDefs) codes (at root) to deactivate.' },
+        remove_tenant_registration: { type: 'boolean', description: 'Also deactivate the tenant.tenants record for this city at the root. Default true.' },
+        dry_run: { type: 'boolean' },
+      },
+      required: ['tenant_id'],
+    },
+    handler: async (args) => {
+      validateTenantId(args.tenant_id, 'tenant_id');
+      await ensureAuthenticated();
+      const cityTenant = args.tenant_id as string;
+      const rootTenant = cityTenant.includes('.') ? cityTenant.split('.')[0] : cityTenant;
+      if (cityTenant === rootTenant) {
+        return JSON.stringify({
+          success: false,
+          error: `tenant_id "${cityTenant}" looks like a root tenant. tenant_destroy is for cities; refuse to operate on roots.`,
+        }, null, 2);
+      }
+      const cityCode = cityTenant.split('.').slice(1).join('.');
+      const deptCodes = (args.department_codes as string[] | undefined) ?? [];
+      const desigCodes = (args.designation_codes as string[] | undefined) ?? [];
+      const ctCodes = (args.complaint_type_codes as string[] | undefined) ?? [];
+      const removeRegistration = (args.remove_tenant_registration as boolean | undefined) ?? true;
+      const dryRun = args.dry_run === true;
+
+      const rootRecordsToDeactivate: Array<{ schemaCode: string; uniqueIdentifier: string }> = [];
+      for (const code of deptCodes) {
+        rootRecordsToDeactivate.push({ schemaCode: 'common-masters.Department', uniqueIdentifier: code });
+      }
+      for (const code of desigCodes) {
+        rootRecordsToDeactivate.push({ schemaCode: 'common-masters.Designation', uniqueIdentifier: code });
+      }
+      for (const code of ctCodes) {
+        rootRecordsToDeactivate.push({ schemaCode: 'RAINMAKER-PGR.ServiceDefs', uniqueIdentifier: code });
+      }
+      if (removeRegistration) {
+        rootRecordsToDeactivate.push({ schemaCode: 'tenant.tenants', uniqueIdentifier: cityCode });
+      }
+
+      if (dryRun) {
+        return JSON.stringify({
+          success: true,
+          dry_run: true,
+          city_tenant: cityTenant,
+          root_tenant: rootTenant,
+          city_cleanup: 'would call tenant_cleanup at city',
+          root_records_to_deactivate: rootRecordsToDeactivate,
+        }, null, 2);
+      }
+
+      const rootResults = { deactivated: 0, missing: 0, failed: 0, errors: [] as string[] };
+      for (const r of rootRecordsToDeactivate) {
+        try {
+          const found = await digitApi.mdmsV2SearchRaw(rootTenant, r.schemaCode, {
+            uniqueIdentifiers: [r.uniqueIdentifier],
+            limit: 1,
+          });
+          if (found.length === 0 || found[0].tenantId !== rootTenant) {
+            rootResults.missing++;
+            continue;
+          }
+          if (!found[0].isActive) {
+            rootResults.deactivated++; // already done
+            continue;
+          }
+          await digitApi.mdmsV2Update(found[0], false);
+          rootResults.deactivated++;
+        } catch (err) {
+          rootResults.failed++;
+          if (rootResults.errors.length < 10) {
+            rootResults.errors.push(`${r.schemaCode}/${r.uniqueIdentifier}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+
+      // City-side cleanup: deactivate any MDMS records owned at the city
+      // (e.g. the boundary hierarchy definition). The existing
+      // tenant_cleanup tool already does the safe city-only filter, but
+      // its handler isn't exposed as a callable from another handler — so
+      // we inline the equivalent paginated search + filter.
+      type MdmsRowAlias = Awaited<ReturnType<typeof digitApi.mdmsV2SearchRaw>>[number];
+      const cityRecords: MdmsRowAlias[] = [];
+      let cityOffset = 0;
+      while (true) {
+        const page = await digitApi.mdmsV2SearchRaw(cityTenant, '', { limit: 500, offset: cityOffset });
+        if (page.length === 0) break;
+        for (const rec of page) {
+          if (rec.tenantId === cityTenant) cityRecords.push(rec);
+        }
+        if (page.length < 500) break;
+        cityOffset += 500;
+      }
+
+      const cityResults = { deactivated: 0, failed: 0 };
+      for (const rec of cityRecords) {
+        if (!rec.isActive) continue;
+        try {
+          await digitApi.mdmsV2Update(rec, false);
+          cityResults.deactivated++;
+        } catch {
+          cityResults.failed++;
+        }
+      }
+
+      return JSON.stringify({
+        success: rootResults.failed === 0 && cityResults.failed === 0,
+        city_tenant: cityTenant,
+        root_tenant: rootTenant,
+        root: rootResults,
+        city: cityResults,
+        note: 'tenant_destroy did NOT touch users (use tenant_cleanup for that) ' +
+          'and did NOT delete boundary entities (boundary-service lacks a delete API). ' +
+          'Boundary hierarchy + relationships are also left in place; recreating with the same hierarchyType is idempotent.',
+      }, null, 2);
     },
   } satisfies ToolMetadata);
 

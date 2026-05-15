@@ -83,6 +83,37 @@ class DigitApiClient {
     };
   }
 
+  /**
+   * Snapshot/restore auth state. Used by the REST shim so each request
+   * runs under the caller's token without leaking state across requests.
+   * Combined with a single-flight mutex this is safe even though the
+   * underlying client is a process-level singleton.
+   */
+  snapshotAuth(): { token: string | null; user: UserInfo | null; stateTenantOverride: string | null } {
+    return {
+      token: this.authToken,
+      user: this.userInfo,
+      stateTenantOverride: this.stateTenantOverride,
+    };
+  }
+
+  restoreAuth(snap: { token: string | null; user: UserInfo | null; stateTenantOverride: string | null }): void {
+    this.authToken = snap.token;
+    this.userInfo = snap.user;
+    this.stateTenantOverride = snap.stateTenantOverride;
+  }
+
+  /**
+   * Apply a caller-provided bearer token (and optional user/state-tenant
+   * context). Used when the REST caller already authenticated upstream
+   * and just passes the token via Authorization header.
+   */
+  applyToken(token: string, user: UserInfo | null, stateTenantOverride: string | null): void {
+    this.authToken = token;
+    this.userInfo = user;
+    this.stateTenantOverride = stateTenantOverride;
+  }
+
   // Resolve endpoint path, applying environment overrides if present
   private endpoint(key: keyof typeof ENDPOINTS): string {
     return this.environment.endpointOverrides?.[key] || ENDPOINTS[key];
@@ -401,20 +432,23 @@ class DigitApiClient {
   async boundarySearch(
     tenantId: string,
     hierarchyType?: string,
-    options?: { limit?: number; offset?: number }
+    options?: { limit?: number; offset?: number; codes?: string[] }
   ): Promise<Record<string, unknown>[]> {
-    const boundary: Record<string, unknown> = {
-      tenantId,
-      limit: options?.limit || 100,
-      offset: options?.offset || 0,
-    };
-    if (hierarchyType) boundary.hierarchyType = hierarchyType;
+    // boundary-service /boundary/_search takes its filters as query-string
+    // params; the body is just RequestInfo. tenantId is always passed via
+    // query so that route's @RequestParam binding picks it up.
+    const params = new URLSearchParams({ tenantId });
+    if (hierarchyType) params.set('hierarchyType', hierarchyType);
+    if (options?.codes && options.codes.length > 0) {
+      params.set('codes', options.codes.join(','));
+    }
+    if (options?.limit !== undefined) params.set('limit', String(options.limit));
+    if (options?.offset !== undefined) params.set('offset', String(options.offset));
 
     const data = await this.request<{ Boundary?: Record<string, unknown>[] }>(
-      this.endpoint('BOUNDARY_SEARCH'),
+      `${this.endpoint('BOUNDARY_SEARCH')}?${params.toString()}`,
       {
         RequestInfo: this.buildRequestInfo(),
-        Boundary: boundary,
       }
     );
 
