@@ -804,6 +804,33 @@ class DigitApiClient {
     return (data.fileStoreIds as Record<string, unknown>[]) || [];
   }
 
+  /**
+   * Download the raw bytes of a filestore entry by ID. Uses the gateway-side
+   * `/filestore/v1/files/id` endpoint which returns the bytes directly,
+   * sidestepping the signed-URL minio host resolution problem in compose stacks
+   * (the signed URL points to the internal `minio:9000` hostname which is not
+   * resolvable from outside the docker network).
+   */
+  async filestoreDownload(
+    tenantId: string,
+    fileStoreId: string,
+  ): Promise<Buffer> {
+    const params = new URLSearchParams({ tenantId, fileStoreId });
+    // FILESTORE_URL is /filestore/v1/files/url; swap the trailing /url for /id
+    // to hit the gateway-routed bytes endpoint.
+    const downloadPath = this.endpoint('FILESTORE_URL').replace(/\/url$/, '/id');
+    const url = `${this.environment.url}${downloadPath}?${params.toString()}`;
+
+    const headers: Record<string, string> = {};
+    if (this.authToken) headers['Authorization'] = `Bearer ${this.authToken}`;
+
+    const response = await fetch(url, { method: 'GET', headers });
+    if (!response.ok) {
+      throw new Error(`filestore_download_failed: ${response.status} for ${fileStoreId}`);
+    }
+    return Buffer.from(await response.arrayBuffer());
+  }
+
   // Access control roles search — tenantId as query param
   async accessRolesSearch(
     tenantId: string

@@ -38,6 +38,7 @@
     "test:cli": "tsx test-cli.ts",
     "test:openapi": "tsx test-openapi-spec.ts",
     "test:safety": "tsx test-agent-safety.ts",
+    "test:dumps:integration": "tsx test-mdms-dump-restore-integration.ts",
     "engram": "tsx engram-agent.ts",
     "prepublishOnly": "npm run build"
   },
@@ -46,6 +47,7 @@
     "@modelcontextprotocol/sdk": "^1.0.0",
     "commander": "^14.0.3",
     "exceljs": "^4.4.0",
+    "jszip": "^3.10.1",
     "pg": "^8.19.0"
   },
   "devDependencies": {
