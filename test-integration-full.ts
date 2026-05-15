@@ -1707,6 +1707,58 @@ async function main() {
   });
 
   // ──────────────────────────────────────────────────────────────────
+  // 15.6 — REGRESSION: cleanup MUST NOT deactivate inherited records.
+  //
+  // The old tenant_cleanup deactivated every record returned by MDMS
+  // search at the target tenant — which, in v2, includes records
+  // inherited from parent tenants (each carrying its own home tenantId).
+  // That call on a city tenant nuked all the root-tenant records the
+  // city was inheriting. v7 added a `record.tenantId === args.tenant_id`
+  // filter; this test guards that filter so the regression can't recur.
+  //
+  // Strategy: invoke cleanup against a non-existent child of the live
+  // state tenant. The MDMS search at that fake child returns records
+  // inherited from the real state root. If the filter works, none get
+  // deactivated and the state root's records are still active afterward.
+  // ──────────────────────────────────────────────────────────────────
+  await test('15.6 tenant_cleanup: inherited records are left alone', async () => {
+    // Snapshot active department count at the real state root.
+    const before = await call('mdms_search', {
+      tenant_id: state.stateTenantId,
+      schema_code: 'common-masters.Department',
+    });
+    const beforeActive = ((before.records as Array<{ isActive: boolean }>) || []).filter((r) => r.isActive).length;
+    assert(beforeActive > 0, `Test setup: expected state root "${state.stateTenantId}" to have active departments, found ${beforeActive}.`);
+
+    // Fake child tenant — non-existent, unique to this run, so even if the
+    // filter were broken nothing of value would actually own this tenantId.
+    const fakeChild = `${state.stateTenantId}.cleanupguard${Date.now()}`;
+    const r = await call('tenant_cleanup', {
+      tenant_id: fakeChild,
+      deactivate_users: false, // no users at this fake tenant
+    });
+    const summary = r.summary as Record<string, number>;
+    assert(r.success === true, `tenant_cleanup against ${fakeChild} failed: ${JSON.stringify(r)}`);
+    assert(summary.mdms_records_owned === 0, `Inheritance filter broken: cleanup reports ${summary.mdms_records_owned} 'owned' records at a non-existent tenant.`);
+    assert(summary.mdms_deleted === 0, `Cleanup deactivated ${summary.mdms_deleted} records at a tenant that owns none. Inheritance filter broken.`);
+    assert((summary.mdms_inherited_left_alone || 0) > 0, `Expected mdms_inherited_left_alone > 0 (the state root has inheritable data); got ${summary.mdms_inherited_left_alone}.`);
+
+    // Re-snapshot — the parent's active records must be untouched.
+    const after = await call('mdms_search', {
+      tenant_id: state.stateTenantId,
+      schema_code: 'common-masters.Department',
+    });
+    const afterActive = ((after.records as Array<{ isActive: boolean }>) || []).filter((r) => r.isActive).length;
+    assert(
+      afterActive === beforeActive,
+      `Inheritance regression: state-root active departments dropped from ${beforeActive} → ${afterActive} after cleanup of a child tenant.`,
+    );
+
+    console.log(`        Verified: cleanup of ${fakeChild} left ${summary.mdms_inherited_left_alone} inherited records untouched (state root still has ${afterActive} active depts).`);
+    return ['tenant_cleanup', 'mdms_search'];
+  });
+
+  // ──────────────────────────────────────────────────────────────────
   // Section 16: Parameter Coverage (untested tool parameters)
   // ──────────────────────────────────────────────────────────────────
   console.log('\n── Section 16: Parameter Coverage ──');

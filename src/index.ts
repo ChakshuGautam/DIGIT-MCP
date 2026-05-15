@@ -156,6 +156,24 @@ if (transportMode === 'stdio') {
       }
     }
 
+    // Form 3: fall back to CRS_USERNAME / CRS_PASSWORD env vars if present.
+    // This mirrors the JSON-RPC path's ensureAuthenticated() so REST callers
+    // running on the same MCP container don't have to repeat the creds in
+    // every body. Skipped if the env isn't configured — caller still gets 401.
+    const envUser = process.env.CRS_USERNAME;
+    const envPass = process.env.CRS_PASSWORD;
+    if (envUser && envPass) {
+      const envTenant = process.env.CRS_TENANT_ID || digitApi.getEnvironmentInfo().stateTenantId;
+      try {
+        if (!digitApi.isAuthenticated()) {
+          await digitApi.login(envUser, envPass, envTenant);
+        }
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, status: 401, error: `env auth failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    }
+
     return null; // caller will translate to 401
   }
 
@@ -558,6 +576,11 @@ if (transportMode === 'stdio') {
     //
     // We accept either `target_tenant` (symmetric with /v1/tenant/bootstrap)
     // or the tool's native `tenant_id` field and forward the right one.
+    //
+    // Accept: text/event-stream (or ?stream=1) streams per-phase progress
+    // (mdms search paging, deactivate batches, user pass) as SSE; final
+    // event is `done` or `error`. Useful because full-tenant cleanups can
+    // run minutes when there are thousands of MDMS records.
     if (req.method === 'POST' && pathname === '/v1/tenant/cleanup') {
       try {
         const body = JSON.parse(await readBody(req));
@@ -568,7 +591,14 @@ if (transportMode === 'stdio') {
         }
         const { target_tenant: _t, ...rest } = body;
         void _t;
-        const result = await dispatchTool('tenant_cleanup', { ...rest, tenant_id: tenantId }, req);
+        const toolArgs = { ...rest, tenant_id: tenantId };
+        const accept = String(req.headers.accept || '');
+        const wantsStream = /text\/event-stream/.test(accept) || /[?&]stream=1\b/.test(url);
+        if (wantsStream) {
+          await runStreamed('tenant_cleanup', toolArgs, req, res);
+          return;
+        }
+        const result = await dispatchTool('tenant_cleanup', toolArgs, req);
         jsonResponse(res, result.status, result.body);
       } catch (err) {
         jsonResponse(res, 400, { success: false, error: String(err) });

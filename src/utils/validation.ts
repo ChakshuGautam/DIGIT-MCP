@@ -10,8 +10,10 @@ export class ValidationError extends Error {
   }
 }
 
-// Tenant ID: lowercase alphanumeric segments separated by dots
-const TENANT_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$/;
+// Tenant ID: lowercase segments separated by dots. Each segment starts with
+// a letter and may contain lowercase letters, digits, and hyphens (DIGIT
+// itself accepts hyphenated city tenants like "ke.poc-mzpt").
+const TENANT_ID_RE = /^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*$/;
 
 // Resource ID: no query params, fragments, or percent-encoding
 const RESOURCE_ID_UNSAFE = /[?#%]/;
