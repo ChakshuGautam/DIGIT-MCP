@@ -44,7 +44,7 @@ export function buildProgram(registry: ToolRegistry): Command {
     .description(
       'DIGIT platform CLI — manage tenants, complaints, employees, and more\n\n' +
       'Examples:\n' +
-      '  $ digit login --environment chakshu-digit --username ADMIN\n' +
+      '  $ digit login --environment self-hosted --username ADMIN\n' +
       '  $ digit pgr search --tenant-id pg.citya --status RESOLVED\n' +
       '  $ digit pgr create --tenant-id pg.citya --service-code StreetLightNotWorking \\\n' +
       '      --description "Broken light" --citizen-name "Ravi" --citizen-mobile 9876543210 \\\n' +
@@ -140,7 +140,7 @@ function addAuthCommands(program: Command): void {
   program
     .command('login')
     .description('Save DIGIT credentials for subsequent commands')
-    .requiredOption('--environment <env>', 'DIGIT environment (e.g. chakshu-digit)')
+    .requiredOption('--environment <env>', 'DIGIT environment (e.g. self-hosted)')
     .requiredOption('--username <user>', 'DIGIT username')
     .requiredOption('--password <pass>', 'DIGIT password (prefer stdin: echo $PASS | digit login ...)')
     .option('--tenant-id [id]', 'Override tenant ID')
