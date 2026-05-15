@@ -51,6 +51,7 @@ export interface DesignationRecord {
   name: string;
   enabled: boolean;
   active: boolean;
+  description?: string;
 }
 
 export interface ComplaintTypeRecord {
@@ -74,6 +75,12 @@ export interface EmployeeRecord {
   appointmentDate: number; // Unix ms
   joiningDate: number; // Unix ms
   password: string;
+  // Configurator-format extras (optional; legacy file may omit)
+  userName?: string;
+  emailId?: string;
+  gender?: string;
+  dob?: number;
+  jurisdictionCodes?: string[];
 }
 
 // ── Helpers ──
@@ -253,9 +260,14 @@ export function readTenantBranding(workbook: ExcelJS.Workbook): TenantBrandingRe
 }
 
 /**
- * Read "Department And Designation Master" sheet → departments, designations, localizations.
- * Auto-generates codes: DEPT_1, DEPT_2..., DESIG_01, DESIG_02...
- * Returns a deptNameToCode map for cross-phase use.
+ * Read departments + designations + their localizations from either the
+ * legacy CCRS dataloader format (one combined "Department And Designation
+ * Master" sheet with `Department Name*` / `Designation Name*` columns and
+ * auto-generated codes) OR the configurator format (separate `Department`
+ * and `Designation` sheets with explicit `code` columns).
+ *
+ * Returns a `deptNameToCode` map keyed by BOTH the human name and the
+ * lowercase code so downstream phases can resolve either reference.
  */
 export function readDepartmentsDesignations(workbook: ExcelJS.Workbook): {
   departments: DepartmentRecord[];
@@ -264,17 +276,91 @@ export function readDepartmentsDesignations(workbook: ExcelJS.Workbook): {
   deptNameToCode: Map<string, string>;
   desigNameToCode: Map<string, string>;
 } {
+  // Configurator format: separate sheets, explicit codes.
+  const deptSheet = findSheet(workbook, 'Department', 'Departments', 'DepartmentMaster', 'department');
+  const desigSheet = findSheet(workbook, 'Designation', 'Designations', 'DesignationMaster', 'designation');
+  if (deptSheet && desigSheet) {
+    return readMastersConfigurator(deptSheet, desigSheet);
+  }
+
+  // Legacy format: one combined sheet.
   const sheet = findSheet(
     workbook,
     'Department And Designation Master',
     'Department and Designation Master',
     'Department And Designation Mast', // ExcelJS truncates to 31 chars
   );
-  if (!sheet) throw new Error("Sheet 'Department And Designation Master' not found in workbook");
+  if (!sheet) {
+    throw new Error(
+      "Masters sheet not found. Expected configurator format ('Department' + 'Designation' sheets) " +
+      "or legacy CCRS format ('Department And Designation Master' sheet).",
+    );
+  }
+  return readMastersLegacy(sheet);
+}
 
+function readMastersConfigurator(
+  deptSheet: ExcelJS.Worksheet,
+  desigSheet: ExcelJS.Worksheet,
+): {
+  departments: DepartmentRecord[];
+  designations: DesignationRecord[];
+  localizations: LocalizationMessage[];
+  deptNameToCode: Map<string, string>;
+  desigNameToCode: Map<string, string>;
+} {
+  const departments: DepartmentRecord[] = [];
+  const deptNameToCode = new Map<string, string>();
+  for (const row of sheetToRows(deptSheet)) {
+    const code = (row['code'] || row['Code'] || row['CODE'])?.trim();
+    const name = (row['name'] || row['Name'])?.trim();
+    if (!code || !name) continue;
+    const active = parseBoolish(row['active'] ?? row['Active'], true);
+    departments.push({ code, name, enabled: active, active });
+    deptNameToCode.set(name, code);
+    deptNameToCode.set(code, code); // self-reference so designation rows that use code resolve cleanly
+  }
+
+  const designations: DesignationRecord[] = [];
+  const desigNameToCode = new Map<string, string>();
+  for (const row of sheetToRows(desigSheet)) {
+    const code = (row['code'] || row['Code'])?.trim();
+    const name = (row['name'] || row['Name'])?.trim();
+    if (!code || !name) continue;
+    const active = parseBoolish(row['active'] ?? row['Active'], true);
+    const description = (row['description'] || row['Description'] || '').trim() || name;
+    designations.push({ code, name, enabled: active, active, description });
+    desigNameToCode.set(name, code);
+    desigNameToCode.set(code, code);
+  }
+
+  const localizations: LocalizationMessage[] = [
+    ...departments.map((d) => ({
+      code: `COMMON_MASTERS_DEPARTMENT_${d.code}`,
+      message: d.name,
+      module: 'rainmaker-common',
+      locale: 'en_IN',
+    })),
+    ...designations.map((d) => ({
+      code: `COMMON_MASTERS_DESIGNATION_${d.code}`,
+      message: d.name,
+      module: 'rainmaker-common',
+      locale: 'en_IN',
+    })),
+  ];
+
+  return { departments, designations, localizations, deptNameToCode, desigNameToCode };
+}
+
+function readMastersLegacy(sheet: ExcelJS.Worksheet): {
+  departments: DepartmentRecord[];
+  designations: DesignationRecord[];
+  localizations: LocalizationMessage[];
+  deptNameToCode: Map<string, string>;
+  desigNameToCode: Map<string, string>;
+} {
   const rows = sheetToRows(sheet);
 
-  // Collect unique names
   const deptNames = new Set<string>();
   const desigNames = new Set<string>();
   for (const row of rows) {
@@ -284,7 +370,6 @@ export function readDepartmentsDesignations(workbook: ExcelJS.Workbook): {
     if (desig) desigNames.add(desig);
   }
 
-  // Generate codes
   const departments: DepartmentRecord[] = [];
   const deptNameToCode = new Map<string, string>();
   let deptIdx = 1;
@@ -305,26 +390,30 @@ export function readDepartmentsDesignations(workbook: ExcelJS.Workbook): {
     desigIdx++;
   }
 
-  // Localization
-  const localizations: LocalizationMessage[] = [];
-  for (const dept of departments) {
-    localizations.push({
-      code: `COMMON_MASTERS_DEPARTMENT_${dept.code}`,
-      message: dept.name,
+  const localizations: LocalizationMessage[] = [
+    ...departments.map((d) => ({
+      code: `COMMON_MASTERS_DEPARTMENT_${d.code}`,
+      message: d.name,
       module: 'rainmaker-common',
       locale: 'en_IN',
-    });
-  }
-  for (const desig of designations) {
-    localizations.push({
-      code: `COMMON_MASTERS_DESIGNATION_${desig.code}`,
-      message: desig.name,
+    })),
+    ...designations.map((d) => ({
+      code: `COMMON_MASTERS_DESIGNATION_${d.code}`,
+      message: d.name,
       module: 'rainmaker-common',
       locale: 'en_IN',
-    });
-  }
+    })),
+  ];
 
   return { departments, designations, localizations, deptNameToCode, desigNameToCode };
+}
+
+function parseBoolish(val: unknown, fallback: boolean): boolean {
+  if (val === undefined || val === null || val === '') return fallback;
+  const s = String(val).trim().toLowerCase();
+  if (['true', '1', 'yes', 'y', 'active'].includes(s)) return true;
+  if (['false', '0', 'no', 'n', 'inactive'].includes(s)) return false;
+  return fallback;
 }
 
 /**
@@ -339,8 +428,19 @@ export function readComplaintTypes(
   complaintTypes: ComplaintTypeRecord[];
   localizations: LocalizationMessage[];
 } {
+  // Configurator format: flat sheet with explicit serviceCode + slaHours + department columns.
+  const flat = findSheet(workbook, 'ComplaintType', 'ComplaintTypes', 'ServiceDefs', 'servicedefs', 'PGR');
+  if (flat) {
+    return readComplaintTypesFlat(flat, deptNameToCode);
+  }
+
   const sheet = findSheet(workbook, 'Complaint Type Master');
-  if (!sheet) throw new Error("Sheet 'Complaint Type Master' not found in workbook");
+  if (!sheet) {
+    throw new Error(
+      "Complaint type sheet not found. Expected configurator format ('ComplaintType' sheet) " +
+      "or legacy CCRS format ('Complaint Type Master' sheet).",
+    );
+  }
 
   const rows = sheetToRows(sheet);
   const complaintTypes: ComplaintTypeRecord[] = [];
@@ -418,23 +518,137 @@ export function readComplaintTypes(
 }
 
 /**
- * Read "Employee Master" sheet → employee records.
- * Auto-generates employee codes from names: "John Smith" → "JOHN_SMITH".
+ * Configurator format: flat ComplaintType sheet with explicit serviceCode,
+ * department references (name or code), and slaHours per row. No parent /
+ * sub-type — every row is a standalone service definition.
+ */
+function readComplaintTypesFlat(
+  sheet: ExcelJS.Worksheet,
+  deptNameToCode: Map<string, string>,
+): {
+  complaintTypes: ComplaintTypeRecord[];
+  localizations: LocalizationMessage[];
+} {
+  const complaintTypes: ComplaintTypeRecord[] = [];
+  const localizations: LocalizationMessage[] = [];
+  let order = 1;
+
+  for (const row of sheetToRows(sheet)) {
+    const serviceCode = (row['serviceCode'] || row['ServiceCode'] || row['code'])?.trim();
+    const name = (row['name'] || row['Name'])?.trim();
+    if (!serviceCode || !name) continue;
+
+    const deptRef = (row['department'] || row['Department'] || '').trim();
+    const deptCode = deptNameToCode.get(deptRef) || deptRef;
+    const slaRaw = row['slaHours'] ?? row['SLA Hours'] ?? row['slaHours*'];
+    const slaHours = parseInt(String(slaRaw ?? ''), 10) || 48;
+    const keywords = (row['keywords'] || row['Keywords'] || '').trim();
+    const active = parseBoolish(row['active'] ?? row['Active'], true);
+
+    complaintTypes.push({
+      serviceCode,
+      name,
+      menuPath: `complaints.categories.${serviceCode}`,
+      department: deptCode,
+      slaHours,
+      keywords,
+      order: order++,
+      active,
+    });
+
+    localizations.push({
+      code: `SERVICEDEFS.${serviceCode.toUpperCase()}`,
+      message: name,
+      module: 'rainmaker-pgr',
+      locale: 'en_IN',
+    });
+  }
+
+  return { complaintTypes, localizations };
+}
+
+/**
+ * Read employees from either configurator format (sheet 'Employee' /
+ * 'Employees' / … with `employeeCode` + `mobileNumber` columns) or legacy
+ * 'Employee Master' (with `User Name*` / `Mobile Number*` columns and
+ * auto-generated codes from name).
  */
 export function readEmployees(workbook: ExcelJS.Workbook): EmployeeRecord[] {
-  const sheet = findSheet(workbook, 'Employee Master');
-  if (!sheet) throw new Error("Sheet 'Employee Master' not found in workbook");
+  const newSheet = findSheet(workbook, 'Employee', 'Employees', 'EmployeeMaster', 'HRMS', 'employee');
+  if (newSheet) {
+    const sample = sheetToRows(newSheet)[0] ?? {};
+    if ('employeeCode' in sample || 'mobileNumber' in sample || 'userName' in sample) {
+      return readEmployeesConfigurator(newSheet);
+    }
+  }
 
+  const sheet = findSheet(workbook, 'Employee Master');
+  if (!sheet) {
+    throw new Error(
+      "Employee sheet not found. Expected configurator format ('Employee' sheet with " +
+      "'employeeCode'/'mobileNumber' columns) or legacy CCRS format ('Employee Master' sheet).",
+    );
+  }
+  return readEmployeesLegacy(sheet);
+}
+
+function readEmployeesConfigurator(sheet: ExcelJS.Worksheet): EmployeeRecord[] {
+  const rows = sheetToRows(sheet);
+  const employees: EmployeeRecord[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const code = (row['employeeCode'] || row['EmployeeCode'] || row['code'])?.trim();
+    const name = (row['name'] || row['Name'])?.trim();
+    const mobile = (row['mobileNumber'] || row['MobileNumber'] || row['mobile'])?.trim();
+    if (!code || !name || !mobile) continue;
+
+    // Pull the raw date cell so excelDateToTimestamp gets a Date object, not a string.
+    const dobRaw = sheet.getRow(i + 2).getCell(findColumnIndex(sheet, 'dob')).value;
+    const appointmentRaw = sheet.getRow(i + 2).getCell(findColumnIndex(sheet, 'dateOfAppointment')).value;
+
+    const roles = (row['roles'] || 'EMPLOYEE')
+      .split(',').map((r) => r.trim()).filter(Boolean);
+    const jurisdictions = (row['jurisdictions'] || '')
+      .split(',').map((r) => r.trim()).filter(Boolean);
+
+    let dob: number | undefined;
+    try { dob = dobRaw ? excelDateToTimestamp(dobRaw) : undefined; } catch { dob = undefined; }
+    let appointmentDate = 0;
+    try { appointmentDate = excelDateToTimestamp(appointmentRaw || row['dateOfAppointment']); } catch { appointmentDate = Date.now(); }
+
+    employees.push({
+      code,
+      name,
+      mobileNumber: mobile.replace(/\D/g, '').slice(-10),
+      departmentName: (row['department'] || '').trim(),
+      designationName: (row['designation'] || '').trim(),
+      roleNames: roles,
+      appointmentDate,
+      joiningDate: appointmentDate,
+      password: row['password'] || 'eGov@123',
+      userName: (row['userName'] || row['username'] || '').trim() || code,
+      emailId: (row['emailId'] || row['email'] || '').trim() || undefined,
+      gender: (row['gender'] || '').trim() || undefined,
+      dob,
+      jurisdictionCodes: jurisdictions,
+    });
+  }
+
+  return employees;
+}
+
+function readEmployeesLegacy(sheet: ExcelJS.Worksheet): EmployeeRecord[] {
   const rows = sheetToRows(sheet);
   const employees: EmployeeRecord[] = [];
   const seenCodes = new Set<string>();
 
-  for (const row of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
     const name = row['User Name*']?.trim();
     const mobile = row['Mobile Number*']?.trim();
     if (!name || !mobile) continue;
 
-    // Generate unique code
     let code = nameToUpperSnake(name);
     if (seenCodes.has(code)) {
       let suffix = 2;
@@ -443,13 +657,8 @@ export function readEmployees(workbook: ExcelJS.Workbook): EmployeeRecord[] {
     }
     seenCodes.add(code);
 
-    // Parse dates — get raw cell values for date conversion
-    const appointmentRaw = sheet.getRow(rows.indexOf(row) + 2).getCell(
-      findColumnIndex(sheet, 'Date of Appointment*'),
-    ).value;
-    const joiningRaw = sheet.getRow(rows.indexOf(row) + 2).getCell(
-      findColumnIndex(sheet, 'Assignment From Date*'),
-    ).value;
+    const appointmentRaw = sheet.getRow(i + 2).getCell(findColumnIndex(sheet, 'Date of Appointment*')).value;
+    const joiningRaw = sheet.getRow(i + 2).getCell(findColumnIndex(sheet, 'Assignment From Date*')).value;
 
     employees.push({
       code,
@@ -457,10 +666,7 @@ export function readEmployees(workbook: ExcelJS.Workbook): EmployeeRecord[] {
       mobileNumber: mobile.replace(/\D/g, '').slice(-10),
       departmentName: row['Department Name*']?.trim() || '',
       designationName: row['Designation Name*']?.trim() || '',
-      roleNames: (row['Role Names*'] || 'EMPLOYEE')
-        .split(',')
-        .map((r: string) => r.trim())
-        .filter(Boolean),
+      roleNames: (row['Role Names*'] || 'EMPLOYEE').split(',').map((r) => r.trim()).filter(Boolean),
       appointmentDate: excelDateToTimestamp(appointmentRaw || row['Date of Appointment*']),
       joiningDate: excelDateToTimestamp(joiningRaw || row['Assignment From Date*']),
       password: row['Password'] || 'eGov@123',

@@ -83,10 +83,23 @@ async function runTenantPhase(
   fileRef: string,
 ): Promise<PhaseResult> {
   const root = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
+  // The city portion of the target tenant_id (e.g. "poc-mzpt" from "ke.poc-mzpt").
+  // If the operator passed a city tenant explicitly, that's what we want to
+  // write — the file's "Tenant Code*" is treated as a default the arg overrides.
+  const targetCityCode = tenantId.includes('.')
+    ? tenantId.split('.').slice(1).join('.').toLowerCase()
+    : null;
 
   const buf = await resolveFile(fileRef, tenantId);
   const workbook = await loadWorkbook(buf);
   const { tenants, localizations } = readTenantInfo(workbook);
+
+  // If caller pinned a target city tenant and the file row's code disagrees,
+  // make the arg authoritative. The wizard does the same: the operator picks
+  // the target tenant before uploading.
+  if (targetCityCode && tenants.length === 1 && tenants[0].code !== targetCityCode) {
+    tenants[0].code = targetCityCode;
+  }
 
   let created = 0;
   let skipped = 0;
@@ -108,7 +121,7 @@ async function runTenantPhase(
       rows.push({ name: tenant.name, code: tenant.code, status: 'created' });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes('already exists') || msg.includes('DUPLICATE') || msg.includes('unique')) {
+      if (/already exists|duplicate|unique/i.test(msg)) {
         skipped++;
         rows.push({ name: tenant.name, code: tenant.code, status: 'exists' });
       } else {
@@ -152,61 +165,293 @@ async function runTenantPhase(
   };
 }
 
+interface BoundaryRow {
+  code: string;
+  name: string;
+  boundaryType: string;
+  parentCode?: string;
+  latitude?: number;
+  longitude?: number;
+}
+
+export interface BoundaryContext {
+  hierarchyType: string;
+  rootBoundaryCode: string;
+  rootBoundaryType: string;
+  levels: string[];
+}
+
 async function runBoundaryPhase(
   tenantId: string,
   fileRef: string,
-): Promise<PhaseResult> {
-  const root = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
-
+  hierarchyTypeOverride?: string,
+): Promise<PhaseResult & { context?: BoundaryContext }> {
   const buf = await resolveFile(fileRef, tenantId);
 
-  // Upload file to filestore
-  const uploadResult = await digitApi.filestoreUpload(
-    root,
-    'boundary',
-    buf,
-    'boundary-data.xlsx',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  );
-
-  if (!uploadResult.length) {
-    return { status: 'failed', error: 'Filestore upload returned no results' };
-  }
-
-  const fileStoreId = (uploadResult[0] as Record<string, unknown>).fileStoreId as string;
-  if (!fileStoreId) {
-    return { status: 'failed', error: 'Filestore upload returned no fileStoreId' };
-  }
-
-  // Call boundary management process API
-  try {
-    const processResult = await digitApi.boundaryMgmtProcess(tenantId, {
-      tenantId,
-      type: 'boundary',
-      hierarchyType: 'ADMIN',
-      fileStoreId,
-      action: 'create',
-    });
-
-    return {
-      status: 'completed',
-      message: 'Boundary file submitted for processing via boundary management service',
-      fileStoreId,
-      processResult,
-    };
-  } catch (error) {
+  // Parse the file once: full rows, plus the distinct boundary-type levels
+  // in topo order (root first). Used both to detect / create the hierarchy
+  // definition and to drive iterative entity+relationship creation.
+  const { levels: fileLevels, rows } = await extractBoundaryFile(buf);
+  if (fileLevels.length === 0 || rows.length === 0) {
     return {
       status: 'failed',
-      error: error instanceof Error ? error.message : String(error),
-      fileStoreId,
+      error: "Couldn't read any boundary rows from the file. " +
+        "Expected a 'Boundary' (or 'Boundaries'/'BoundaryMaster'/'boundary') sheet with " +
+        "columns 'code', 'name', 'boundaryType', 'parentCode'.",
     };
   }
+
+  // Resolve hierarchy: caller override → existing match (at city) → auto-create.
+  // Hierarchies do NOT inherit across tenants in egov-bndry-mgmnt, so we only
+  // search at the city tenant and create there too. This is what the
+  // configurator does.
+  let hierarchyType = hierarchyTypeOverride;
+  let hierarchyAction: 'used' | 'created' = 'used';
+
+  if (!hierarchyType) {
+    const cityHierarchies = await digitApi.boundaryHierarchySearch(tenantId).catch(() => []);
+    const match = (cityHierarchies as Record<string, unknown>[])
+      .find((h) => hierarchyMatchesLevels(h, fileLevels));
+    if (match) {
+      hierarchyType = match.hierarchyType as string;
+    } else {
+      const cityCode = tenantId.includes('.') ? tenantId.split('.').slice(1).join('-') : tenantId;
+      hierarchyType = `${cityCode.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}_ADMIN`;
+      const hierarchyDef = fileLevels.map((level, idx) => ({
+        boundaryType: level,
+        parentBoundaryType: idx === 0 ? null : fileLevels[idx - 1],
+        active: true,
+      }));
+      try {
+        await digitApi.boundaryHierarchyCreate(tenantId, hierarchyType, hierarchyDef);
+        hierarchyAction = 'created';
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `Failed to auto-create boundary hierarchy "${hierarchyType}" at "${tenantId}": ` +
+            (err instanceof Error ? err.message : String(err)),
+          fileLevels,
+        };
+      }
+    }
+  }
+
+  // Group rows by level, processing parents before children (boundary
+  // service requires parent boundary entity + relationship to exist before
+  // we can create a child relationship pointing at it).
+  const rowsByLevel = new Map<string, BoundaryRow[]>();
+  for (const r of rows) {
+    const arr = rowsByLevel.get(r.boundaryType) ?? [];
+    arr.push(r);
+    rowsByLevel.set(r.boundaryType, arr);
+  }
+
+  const entityStats = { created: 0, exists: 0, failed: 0 };
+  const relStats = { created: 0, exists: 0, failed: 0 };
+  const entityFailures: string[] = [];
+  const relFailures: string[] = [];
+
+  for (const level of fileLevels) {
+    const levelRows = rowsByLevel.get(level) ?? [];
+
+    // Entities first (batched). egov-boundary-service /boundary/_create
+    // takes an array, so 100-at-a-time keeps round-trips low without
+    // blowing past payload limits.
+    const BATCH = 100;
+    for (let i = 0; i < levelRows.length; i += BATCH) {
+      const batch = levelRows.slice(i, i + BATCH);
+      try {
+        await digitApi.boundaryCreate(tenantId, batch.map((b) => ({ code: b.code })));
+        entityStats.created += batch.length;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/already exists|duplicate/i.test(msg)) {
+          // Some batched entities already existed — fall back to one-at-a-time
+          // so we can count exists vs. created cleanly without re-failing.
+          for (const b of batch) {
+            try {
+              await digitApi.boundaryCreate(tenantId, [{ code: b.code }]);
+              entityStats.created++;
+            } catch (innerErr) {
+              const innerMsg = innerErr instanceof Error ? innerErr.message : String(innerErr);
+              if (/already exists|duplicate/i.test(innerMsg)) {
+                entityStats.exists++;
+              } else {
+                entityStats.failed++;
+                if (entityFailures.length < 10) entityFailures.push(`${b.code}: ${innerMsg}`);
+              }
+            }
+          }
+        } else {
+          entityStats.failed += batch.length;
+          if (entityFailures.length < 10) entityFailures.push(`batch ${i}: ${msg}`);
+        }
+      }
+    }
+
+    // Relationships one-at-a-time. The API only takes singletons, and the
+    // boundary-service occasionally returns "Boundary entity does not exist"
+    // or "Parent entity for current boundary relationship does not exist"
+    // even when the row is in the DB — Kafka/cache lag from the batched
+    // entity creates above. Re-queue race-style failures and retry with
+    // backoff before declaring real failure.
+    const pending: BoundaryRow[] = [...levelRows];
+    const maxPasses = 5;
+    for (let pass = 0; pass < maxPasses && pending.length > 0; pass++) {
+      if (pass > 0) {
+        const backoffMs = 500 * pass;
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      }
+      const stillPending: BoundaryRow[] = [];
+      for (const b of pending) {
+        try {
+          await digitApi.boundaryRelationshipCreate(
+            tenantId, b.code, hierarchyType, b.boundaryType, b.parentCode ?? null,
+          );
+          relStats.created++;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (/already exists|duplicate/i.test(msg)) {
+            relStats.exists++;
+          } else if (/entity does not exist|parent.*does not exist/i.test(msg) && pass < maxPasses - 1) {
+            stillPending.push(b);
+          } else {
+            relStats.failed++;
+            if (relFailures.length < 10) relFailures.push(`${b.code} (pass ${pass}): ${msg}`);
+          }
+        }
+      }
+      pending.length = 0;
+      pending.push(...stillPending);
+    }
+  }
+
+  const rootRow = rows.find((r) => !r.parentCode) || rows[0];
+  const context: BoundaryContext = {
+    hierarchyType,
+    rootBoundaryCode: rootRow.code,
+    rootBoundaryType: rootRow.boundaryType,
+    levels: fileLevels,
+  };
+
+  const failed = entityStats.failed + relStats.failed;
+  const created = entityStats.created + relStats.created;
+
+  return {
+    status: failed > 0 && created === 0 ? 'failed' : 'completed',
+    message: `Hierarchy ${hierarchyAction}: ${hierarchyType}. ` +
+      `Entities ${entityStats.created} created, ${entityStats.exists} existed, ${entityStats.failed} failed. ` +
+      `Relationships ${relStats.created} created, ${relStats.exists} existed, ${relStats.failed} failed.`,
+    hierarchyType,
+    hierarchyAction,
+    levels: fileLevels,
+    counts: { entities: entityStats, relationships: relStats, total_rows: rows.length },
+    entity_failures: entityFailures,
+    relationship_failures: relFailures,
+    context,
+  };
+}
+
+/**
+ * Read the Boundary sheet once. Returns all rows + the distinct boundary-type
+ * levels in topological order (root first). Used to detect / build the
+ * hierarchy AND to drive iterative entity+relationship creation.
+ */
+async function extractBoundaryFile(buf: Buffer): Promise<{ levels: string[]; rows: BoundaryRow[] }> {
+  const ExcelJSMod = await import('exceljs');
+  const wb = new ExcelJSMod.default.Workbook();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await wb.xlsx.load(buf as any);
+
+  const candidates = ['Boundary', 'Boundaries', 'BoundaryMaster', 'boundary'];
+  let sheet: import('exceljs').Worksheet | undefined;
+  for (const name of candidates) {
+    sheet = wb.worksheets.find((ws) => ws.name.toLowerCase() === name.toLowerCase());
+    if (sheet) break;
+  }
+  if (!sheet) return { levels: [], rows: [] };
+
+  const headerRow = sheet.getRow(1);
+  const headers: Record<string, number> = {};
+  headerRow.eachCell({ includeEmpty: true }, (cell, col) => {
+    headers[String(cell.text || '').trim()] = col;
+  });
+  const typeCol = headers['boundaryType'] ?? headers['BoundaryType'] ?? headers['type'];
+  const codeCol = headers['code'] ?? headers['Code'];
+  const nameCol = headers['name'] ?? headers['Name'] ?? codeCol;
+  const parentCodeCol = headers['parentCode'] ?? headers['ParentCode'] ?? headers['parent'];
+  const latCol = headers['latitude'] ?? headers['Latitude'];
+  const lngCol = headers['longitude'] ?? headers['Longitude'];
+  if (!typeCol || !codeCol) return { levels: [], rows: [] };
+
+  const rows: BoundaryRow[] = [];
+  const codeToType = new Map<string, string>();
+
+  sheet.eachRow({ includeEmpty: false }, (row, rowNum) => {
+    if (rowNum === 1) return;
+    const code = String(row.getCell(codeCol).text || '').trim();
+    const t = String(row.getCell(typeCol).text || '').trim();
+    if (!code || !t) return;
+    const pc = parentCodeCol ? String(row.getCell(parentCodeCol).text || '').trim() : '';
+    const name = nameCol ? String(row.getCell(nameCol).text || '').trim() : code;
+    const lat = latCol ? Number(row.getCell(latCol).value) : NaN;
+    const lng = lngCol ? Number(row.getCell(lngCol).value) : NaN;
+    rows.push({
+      code,
+      name: name || code,
+      boundaryType: t,
+      parentCode: pc || undefined,
+      latitude: Number.isFinite(lat) ? lat : undefined,
+      longitude: Number.isFinite(lng) ? lng : undefined,
+    });
+    codeToType.set(code, t);
+  });
+
+  // Topological sort the types based on parent-child relationships found
+  // in the data.
+  const childParentTypes = new Map<string, string | null>();
+  for (const r of rows) {
+    const parentType = r.parentCode ? (codeToType.get(r.parentCode) || null) : null;
+    if (!childParentTypes.has(r.boundaryType) || (parentType && !childParentTypes.get(r.boundaryType))) {
+      childParentTypes.set(r.boundaryType, parentType);
+    }
+  }
+
+  const ordered: string[] = [];
+  const remaining = new Map(childParentTypes);
+  while (remaining.size > 0) {
+    let progress = false;
+    for (const [type, parent] of remaining.entries()) {
+      if (!parent || ordered.includes(parent)) {
+        ordered.push(type);
+        remaining.delete(type);
+        progress = true;
+      }
+    }
+    if (!progress) {
+      for (const t of remaining.keys()) ordered.push(t);
+      break;
+    }
+  }
+
+  return { levels: ordered, rows };
+}
+
+function hierarchyMatchesLevels(
+  hierarchy: Record<string, unknown>,
+  fileLevels: string[],
+): boolean {
+  const levels = hierarchy.boundaryHierarchy as Array<{ boundaryType: string }> | undefined;
+  if (!Array.isArray(levels)) return false;
+  if (levels.length !== fileLevels.length) return false;
+  const lower = (s: string) => s.trim().toLowerCase();
+  return levels.every((l, i) => lower(l.boundaryType) === lower(fileLevels[i]));
 }
 
 async function runMastersPhase(
   tenantId: string,
   fileRef: string,
-): Promise<PhaseResult & { deptNameToCode?: Map<string, string> }> {
+): Promise<PhaseResult & { deptNameToCode?: Map<string, string>; desigNameToCode?: Map<string, string> }> {
   const root = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
 
   const buf = await resolveFile(fileRef, tenantId);
@@ -229,35 +474,53 @@ async function runMastersPhase(
     desigNameToCode,
   } = readDepartmentsDesignations(workbook);
 
+  // Schema only allows { code, name, active } — projecting explicitly so
+  // we don't trip "extraneous key" validation on extra interface fields.
   const deptStats = result.departments as Record<string, number>;
+  const deptFailures: string[] = [];
   for (const dept of departments) {
     try {
-      await digitApi.mdmsV2Create(root, 'common-masters.Department', dept.code, dept as unknown as Record<string, unknown>);
+      await digitApi.mdmsV2Create(root, 'common-masters.Department', dept.code, {
+        code: dept.code,
+        name: dept.name,
+        active: dept.active,
+      });
       deptStats.created++;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes('already exists') || msg.includes('DUPLICATE') || msg.includes('unique')) {
+      if (/already exists|duplicate|unique/i.test(msg)) {
         deptStats.exists++;
       } else {
         deptStats.failed++;
+        deptFailures.push(`${dept.code}: ${msg}`);
       }
     }
   }
+  if (deptFailures.length) result.department_failures = deptFailures;
 
   const desigStats = result.designations as Record<string, number>;
+  const desigFailures: string[] = [];
   for (const desig of designations) {
+    const payload: Record<string, unknown> = {
+      code: desig.code,
+      name: desig.name,
+      active: desig.active,
+    };
+    if (desig.description) payload.description = desig.description;
     try {
-      await digitApi.mdmsV2Create(root, 'common-masters.Designation', desig.code, desig as unknown as Record<string, unknown>);
+      await digitApi.mdmsV2Create(root, 'common-masters.Designation', desig.code, payload);
       desigStats.created++;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes('already exists') || msg.includes('DUPLICATE') || msg.includes('unique')) {
+      if (/already exists|duplicate|unique/i.test(msg)) {
         desigStats.exists++;
       } else {
         desigStats.failed++;
+        desigFailures.push(`${desig.code}: ${msg}`);
       }
     }
   }
+  if (desigFailures.length) result.designation_failures = desigFailures;
 
   // ── Complaint Types ──
   let complaintTypes: Array<Record<string, unknown>> = [];
@@ -277,7 +540,7 @@ async function runMastersPhase(
       ctStats.created++;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes('already exists') || msg.includes('DUPLICATE') || msg.includes('unique')) {
+      if (/already exists|duplicate|unique/i.test(msg)) {
         ctStats.exists++;
       } else {
         ctStats.failed++;
@@ -296,8 +559,10 @@ async function runMastersPhase(
     }
   }
 
-  // Pass deptNameToCode for Phase 4
+  // Pass both maps to Phase 4 so designations created in this same run
+  // resolve cleanly without an extra MDMS round-trip.
   result.deptNameToCode = deptNameToCode;
+  result.desigNameToCode = desigNameToCode;
 
   return result;
 }
@@ -306,6 +571,8 @@ async function runEmployeePhase(
   tenantId: string,
   fileRef: string,
   deptNameToCode?: Map<string, string>,
+  desigNameToCode?: Map<string, string>,
+  boundaryContext?: BoundaryContext,
 ): Promise<PhaseResult> {
   const root = tenantId.includes('.') ? tenantId.split('.')[0] : tenantId;
 
@@ -315,30 +582,72 @@ async function runEmployeePhase(
 
   // If deptNameToCode not provided from Phase 3, fetch from MDMS
   const deptMap = deptNameToCode || new Map<string, string>();
-  const desigMap = new Map<string, string>();
+  const desigMap = desigNameToCode || new Map<string, string>();
 
   if (deptMap.size === 0) {
     try {
       const depts = await digitApi.mdmsV2Search<Record<string, unknown>>(root, 'common-masters.Department');
       for (const d of depts) {
         deptMap.set(d.name as string, d.code as string);
+        deptMap.set(d.code as string, d.code as string);
       }
     } catch {
       // Will proceed with raw names
     }
   }
 
-  try {
-    const desigs = await digitApi.mdmsV2Search<Record<string, unknown>>(root, 'common-masters.Designation');
-    for (const d of desigs) {
-      desigMap.set(d.name as string, d.code as string);
+  if (desigMap.size === 0) {
+    try {
+      const desigs = await digitApi.mdmsV2Search<Record<string, unknown>>(root, 'common-masters.Designation');
+      for (const d of desigs) {
+        desigMap.set(d.name as string, d.code as string);
+        desigMap.set(d.code as string, d.code as string);
+      }
+    } catch {
+      // Will proceed with raw names
     }
-  } catch {
-    // Will proceed with raw names
+  }
+
+  // Resolve jurisdiction: prefer the boundary context handed in by Phase 2.
+  // Falls back to a search at the city tenant for tenants where boundaries
+  // were seeded by a different process. The hardcoded `ADMIN`/`City` of the
+  // old implementation only worked on tenants that happened to use those
+  // exact identifiers.
+  let jurisdiction: { hierarchy: string; boundaryType: string; boundary: string; tenantId: string } | undefined;
+  if (boundaryContext) {
+    jurisdiction = {
+      hierarchy: boundaryContext.hierarchyType,
+      boundaryType: boundaryContext.rootBoundaryType,
+      boundary: boundaryContext.rootBoundaryCode,
+      tenantId,
+    };
+  } else {
+    try {
+      const hierarchies = await digitApi.boundaryHierarchySearch(tenantId);
+      const h = hierarchies[0] as Record<string, unknown> | undefined;
+      const levels = h?.boundaryHierarchy as Array<{ boundaryType: string }> | undefined;
+      const topType = levels?.[0]?.boundaryType;
+      if (h && topType) {
+        // Need a boundary code at the top level. Cheapest: search by tenant.
+        const boundaries = await digitApi.boundarySearch(tenantId, topType).catch(() => []);
+        const topCode = (boundaries[0] as Record<string, unknown> | undefined)?.code as string | undefined;
+        if (topCode) {
+          jurisdiction = {
+            hierarchy: h.hierarchyType as string,
+            boundaryType: topType,
+            boundary: topCode,
+            tenantId,
+          };
+        }
+      }
+    } catch {
+      // Fall through — employee create will fail loudly with jurisdiction errors.
+    }
   }
 
   const rows: RowStatus[] = [];
   let created = 0;
+  let existsCount = 0;
   let failedCount = 0;
 
   for (const emp of employees) {
@@ -355,19 +664,12 @@ async function runEmployeePhase(
       },
     ];
 
-    const jurisdictions = [
-      {
-        hierarchy: 'ADMIN',
-        boundaryType: 'City',
-        boundary: tenantId,
-        tenantId,
-      },
-    ];
+    const jurisdictions = jurisdiction ? [jurisdiction] : [];
 
-    const user = {
+    const user: Record<string, unknown> = {
       name: emp.name,
       mobileNumber: emp.mobileNumber,
-      userName: emp.code,
+      userName: emp.userName || emp.code,
       password: emp.password,
       tenantId,
       roles: emp.roleNames.map((r) => ({
@@ -376,6 +678,12 @@ async function runEmployeePhase(
         tenantId,
       })),
     };
+    // HRMS user validation requires gender + dob to be non-null. Fall back
+    // to sensible defaults when the file omits them so the create doesn't
+    // fail with "must not be null". Operator can later edit via UI.
+    user.gender = emp.gender || 'OTHERS';
+    user.dob = emp.dob ?? 631152000000; // 1990-01-01 sentinel
+    if (emp.emailId) user.emailId = emp.emailId;
 
     try {
       await digitApi.employeeCreate(tenantId, [
@@ -393,14 +701,23 @@ async function runEmployeePhase(
       rows.push({ name: emp.name, code: emp.code, status: 'created' });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      failedCount++;
-      rows.push({ name: emp.name, code: emp.code, status: 'failed', error: msg });
+      // Idempotent re-runs: HRMS / egov-user respond with "User already exists"
+      // when the username or mobile is already taken. That's a successful
+      // no-op from the operator's perspective, not a failure.
+      if (/already exists|duplicate/i.test(msg)) {
+        existsCount++;
+        rows.push({ name: emp.name, code: emp.code, status: 'exists' });
+      } else {
+        failedCount++;
+        rows.push({ name: emp.name, code: emp.code, status: 'failed', error: msg });
+      }
     }
   }
 
   return {
-    status: failedCount > 0 && created === 0 ? 'failed' : 'completed',
+    status: failedCount > 0 && created === 0 && existsCount === 0 ? 'failed' : 'completed',
     created,
+    exists: existsCount,
     failed: failedCount,
     rows,
   };
@@ -430,6 +747,8 @@ export async function loadFromXlsx(options: XlsxLoadOptions): Promise<XlsxLoadRe
   };
 
   let deptNameToCode: Map<string, string> | undefined;
+  let desigNameToCode: Map<string, string> | undefined;
+  let boundaryContext: BoundaryContext | undefined;
 
   // Phase 1: Tenant
   if (tenant_file) {
@@ -446,7 +765,10 @@ export async function loadFromXlsx(options: XlsxLoadOptions): Promise<XlsxLoadRe
   // Phase 2: Boundaries
   if (boundary_file) {
     try {
-      result.phases.boundaries = await runBoundaryPhase(tenant_id, boundary_file);
+      const boundaryResult = await runBoundaryPhase(tenant_id, boundary_file);
+      boundaryContext = boundaryResult.context;
+      const { context: _bctx, ...serializable } = boundaryResult;
+      result.phases.boundaries = serializable;
     } catch (error) {
       result.phases.boundaries = {
         status: 'failed',
@@ -460,8 +782,8 @@ export async function loadFromXlsx(options: XlsxLoadOptions): Promise<XlsxLoadRe
     try {
       const mastersResult = await runMastersPhase(tenant_id, masters_file);
       deptNameToCode = mastersResult.deptNameToCode;
-      // Remove the Map from the serializable result
-      const { deptNameToCode: _, ...serializableResult } = mastersResult;
+      desigNameToCode = mastersResult.desigNameToCode;
+      const { deptNameToCode: _d, desigNameToCode: _g, ...serializableResult } = mastersResult;
       result.phases.masters = serializableResult;
     } catch (error) {
       result.phases.masters = {
@@ -474,7 +796,9 @@ export async function loadFromXlsx(options: XlsxLoadOptions): Promise<XlsxLoadRe
   // Phase 4: Employees
   if (employee_file) {
     try {
-      result.phases.employees = await runEmployeePhase(tenant_id, employee_file, deptNameToCode);
+      result.phases.employees = await runEmployeePhase(
+        tenant_id, employee_file, deptNameToCode, desigNameToCode, boundaryContext,
+      );
     } catch (error) {
       result.phases.employees = {
         status: 'failed',
