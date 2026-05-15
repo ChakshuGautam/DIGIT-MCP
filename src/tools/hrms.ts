@@ -170,8 +170,16 @@ export function registerHrmsTools(registry: ToolRegistry): void {
         gender: (args.gender as string) || null,
         type: 'EMPLOYEE',
         active: true,
+        // Roles must be tagged with the state root — that's where
+        // ACCESSCONTROL-ROLES MDMS lives; HRMS rejects "Invalid role"
+        // if role.tenantId is a leaf city.
         roles: mappedRoles,
-        tenantId: roleTenant,
+        // User itself must live on the REQUESTED tenant. egov-user
+        // scopes lookups by (id, tenantid). The SPA login form sends
+        // tenantId=<city>, so a user created with tenantId=<root> is
+        // invisible to login. Previous code set this to roleTenant
+        // (root), breaking employee logins on every city tenant.
+        tenantId,
       };
       if (existingUserUuid) {
         // Trigger HRMS's uuid-link short-circuit (digit-common-boundary-uuidlink+).
@@ -218,12 +226,16 @@ export function registerHrmsTools(registry: ToolRegistry): void {
         const created = result[0];
         const user = created.user as Record<string, unknown> | undefined;
 
-        // HRMS doesn't reliably set the user password. Reset it via user update
-        // so the employee can actually login.
+        // HRMS doesn't reliably set the user password. Reset it via
+        // user update so the employee can actually login. Search must
+        // use the *user's actual tenantId* (the city tenant the user
+        // was created on), not the role tenant. Using the role tenant
+        // would return an empty result on city tenants and leave the
+        // password unset.
         if (user?.uuid) {
           try {
-            const searchTenant = roleTenant;
-            const users = await digitApi.userSearch(searchTenant, { uuid: [user.uuid as string], limit: 1 });
+            const userTenant = (user.tenantId as string) || tenantId;
+            const users = await digitApi.userSearch(userTenant, { uuid: [user.uuid as string], limit: 1 });
             if (users.length > 0) {
               await digitApi.userUpdate({ ...users[0], password: 'eGov@123' });
             }
@@ -250,7 +262,11 @@ export function registerHrmsTools(registry: ToolRegistry): void {
             loginCredentials: {
               username: created.code,
               password: 'eGov@123',
-              loginTenantId: roleTenant,
+              // Login must use the city tenant where the user was
+              // actually provisioned. Auth is scoped by tenantId in
+              // egov-user — a user on `<state>.<city>` is invisible to
+              // a login attempt with tenantId=`<state>`.
+              loginTenantId: tenantId,
               note: 'To authenticate as this employee, use the employee CODE as the username (not mobile number).',
             },
           },
