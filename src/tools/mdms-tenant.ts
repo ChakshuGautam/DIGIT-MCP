@@ -1067,7 +1067,26 @@ export function registerMdmsTenantTools(registry: ToolRegistry): void {
               }
             } catch (error) {
               const msg = error instanceof Error ? error.message : String(error);
-              results.data.failed.push(`${schemaCode}/${record.uniqueIdentifier}: ${msg}`);
+              // Same pattern used everywhere else in this file (e.g. lines 154,
+              // 826, 938 for the workflow/schema/admin-user code paths). The
+              // targetByUid pre-check above already skips records the search
+              // returned, but the search can return stale results — mdms-v2's
+              // per-tenant cache lags Kafka, and a record written ≤30s ago via
+              // a prior bootstrap retry won't be in the search response yet.
+              // When that happens we hit the server-side unique constraint and
+              // get "Duplicate record" / "DUPLICATE_KEY" back. Treat those as
+              // `skipped` (idempotency working) rather than `failed` so the
+              // summary doesn't drown real failures in noise on retries.
+              if (
+                msg.includes('DUPLICATE') ||
+                msg.toLowerCase().includes('duplicate record') ||
+                msg.includes('already exists') ||
+                msg.includes('unique')
+              ) {
+                results.data.skipped.push(`${schemaCode}/${record.uniqueIdentifier}`);
+              } else {
+                results.data.failed.push(`${schemaCode}/${record.uniqueIdentifier}: ${msg}`);
+              }
             }
           }
         } catch (schemaErr) {
